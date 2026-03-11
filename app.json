@@ -1,6 +1,7 @@
 {
   "expo": {
-    "name": "LeftSeat",
+    "name": "Left Seat",
+    "displayName": "Left Seat",
     "slug": "LeftSeat",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -10,7 +11,11 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.LeftSeat"
+      "bundleIdentifier": "com.anonymous.LeftSeat",
+      "infoPlist": {
+        "NSCalendarsUsageDescription": "Left Seat uses your calendar to add fly-in events and airshows.",
+        "NSCalendarsFullAccessUsageDescription": "Left Seat uses your calendar to add fly-in events and airshows."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -20,7 +25,8 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.anonymous.LeftSeat"
     },
     "web": {
       "output": "static",

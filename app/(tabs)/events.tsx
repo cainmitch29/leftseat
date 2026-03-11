@@ -1,9 +1,8 @@
 import { supabase } from '@/lib/supabase';
-import * as Calendar from 'expo-calendar';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Linking, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 const EVENT_TYPES = ['All', 'Fly-In', 'Airshow', 'Pancake Breakfast', 'Poker Run', 'EAA Event', 'AOPA Event', 'Other'];
@@ -83,16 +82,14 @@ export default function EventsScreen() {
   }
 
   async function addToCalendar(event: any) {
-    const { status } = await Calendar.requestCalendarPermissionsAsync();
-    if (status !== 'granted') { Alert.alert('Permission needed', 'Please allow calendar access in Settings.'); return; }
-    try {
-      const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
-      const defaultCal = calendars.find(c => c.allowsModifications) || calendars[0];
-      const eventDate = new Date(event.date + 'T12:00:00');
-      const endDate = new Date(eventDate.getTime() + 4 * 60 * 60 * 1000);
-      await Calendar.createEventAsync(defaultCal.id, { title: `✈️ ${event.title}`, startDate: eventDate, endDate, location: `${event.airport_name} (${event.icao}), ${event.city}, ${event.state}`, notes: event.description || '', timeZone: 'America/Chicago' });
-      Alert.alert('Added to Calendar! 📅', `"${event.title}" has been added to your calendar.`);
-    } catch (e) { Alert.alert('Error', 'Could not add to calendar.'); }
+    const startDate = new Date(event.date + 'T12:00:00');
+    const url = `calshow:${Math.floor(startDate.getTime() / 1000)}`;
+    const canOpen = await Linking.canOpenURL(url);
+    if (canOpen) {
+      await Linking.openURL(url);
+    } else {
+      Alert.alert('Opens Calendar', 'Could not open the Calendar app.');
+    }
   }
 
   async function submitEvent() {
@@ -198,10 +195,10 @@ export default function EventsScreen() {
             <Text style={styles.fieldLabel}>Event Title *</Text>
             <TextInput style={styles.input} placeholder="e.g. EAA Chapter 54 Pancake Breakfast" placeholderTextColor="#4A5B73" value={form.title} onChangeText={v => setForm(f => ({ ...f, title: v }))} />
             <Text style={styles.fieldLabel}>Event Type</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }} contentContainerStyle={{ gap: 8 }}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }} contentContainerStyle={{ gap: 8, alignItems: 'center' }}>
               {EVENT_TYPES.filter(t => t !== 'All').map(t => (
                 <TouchableOpacity key={t} style={[styles.chip, form.type === t && styles.chipActive]} onPress={() => setForm(f => ({ ...f, type: t }))}>
-                  <Text style={[styles.chipText, form.type === t && styles.chipTextActive]}>{t}</Text>
+                  <Text style={[styles.chipText, form.type === t && styles.chipTextActive]}>{TYPE_EMOJIS[t]} {t}</Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
