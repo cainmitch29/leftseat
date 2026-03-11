@@ -3,13 +3,53 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
+import { GOOGLE_KEY } from '@/utils/config';
 import {
   ActivityIndicator, Alert, Modal, ScrollView,
   StyleSheet, Text, TouchableOpacity, View
 } from 'react-native';
 
 const airports: any[] = airportsData as any[];
-const GOOGLE_KEY = 'AIzaSyAP7EitXnoZAhammN6w1RhvFJ2DoZnfd1k';
+
+// Generic chain/low-interest names to filter out of highlights
+const GENERIC_NAMES = [
+  'mcdonald', 'subway', 'burger king', "wendy's", 'taco bell', 'pizza hut',
+  'domino', 'kfc', 'walmart', 'target', 'walgreens', 'cvs', 'dollar tree',
+  'dollar general', 'speedway', 'circle k', "casey's", 'kwik trip', 'loves',
+  'flying j', 'pilot travel', 'holiday inn express', 'best western',
+  'comfort inn', 'super 8', 'days inn', 'motel 6', 'quality inn',
+];
+
+const FUEL_LABELS: Record<string, string> = { A: 'Jet A', 'A+': 'Jet A+', B: 'Jet B' };
+function formatFuel(fuel: string): string {
+  return fuel.split(',').map(f => FUEL_LABELS[f.trim()] ?? f.trim()).join(' / ');
+}
+
+function isGenericPlace(name: string): boolean {
+  const lower = name.toLowerCase();
+  return GENERIC_NAMES.some(g => lower.includes(g));
+}
+
+function scorePlaceQuality(place: any): number {
+  const rating = place.rating || 0;
+  const reviews = place.user_ratings_total || 0;
+  if (reviews < 15) return 0;
+  return rating * Math.log(reviews + 1);
+}
+
+// Score an airport's baseline destination value (runway length + services)
+function scoreAirportQuality(a: any): number {
+  let score = 0;
+  const rl = a.runways?.length
+    ? Math.max(...a.runways.map((r: any) => r.length || 0))
+    : 0;
+  if (rl >= 5000) score += 20;
+  else if (rl >= 3500) score += 10;
+  else if (rl >= 2500) score += 5;
+  if (a.has_tower === 'ATCT') score += 15;
+  if (a.city) score += 5; // has a city tag = likely a proper town nearby
+  return score;
+}
 
 const HOUR_OPTIONS = [
   { label: '30 min', hours: 0.5 },
@@ -32,35 +72,89 @@ function getDistanceMiles(lat1: number, lng1: number, lat2: number, lng2: number
   return getDistanceNm(lat1, lng1, lat2, lng2) * 1.15078;
 }
 
-async function fetchHighlight(lat: number, lng: number, interests: string[]): Promise<{ emoji: string; name: string; type: string } | null> {
-  const allTypes = [
-    { id: 'food', type: 'restaurant', emoji: '🍽', label: 'restaurant' },
-    { id: 'golf', type: 'golf_course', emoji: '⛳', label: 'golf course' },
-    { id: 'culture', type: 'museum', emoji: '🏛', label: 'museum' },
-    { id: 'outdoors', type: 'park', emoji: '🌲', label: 'park' },
-    { id: 'entertainment', type: 'tourist_attraction', emoji: '🎯', label: 'attraction' },
-    { id: 'shopping', type: 'shopping_mall', emoji: '🛍', label: 'shopping' },
-    { id: 'beach', type: 'natural_feature', emoji: '🏖', label: 'beach' },
-  ];
+const SCENIC_KEYWORDS = ['lake', 'river', 'mountain', 'state park', 'national', 'falls', 'canyon', 'trail', 'forest', 'scenic', 'overlook', 'ridge', 'valley', 'gorge', 'reservoir', 'bay', 'coast', 'beach', 'island'];
+const SCENIC_TYPES = ['natural_feature', 'park', 'campground', 'rv_park'];
 
-  // Filter by user interests if available
-  const preferred = interests.length > 0
-    ? allTypes.filter(t => interests.includes(t.id))
-    : allTypes;
-  const pool = preferred.length > 0 ? preferred : allTypes;
-  const pick = pool[Math.floor(Math.random() * pool.length)];
+function isScenic(place: any): boolean {
+  const lower = place.name.toLowerCase();
+  return SCENIC_KEYWORDS.some(k => lower.includes(k)) ||
+    (place.types || []).some((t: string) => SCENIC_TYPES.includes(t));
+}
 
+async function fetchDestinationSummary(airport: any, lat: number, lng: number): Promise<string[]> {
+  const base = `https://maps.googleapis.com/maps/api/place/nearbysearch/json`;
+  const radius = 12000; // ~7.5 miles from the field
   try {
-    const res = await fetch(
-      `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=16000&type=${pick.type}&key=${GOOGLE_KEY}`
-    );
-    const data = await res.json();
-    if (data.results?.length > 0) {
-      const place = data.results[Math.floor(Math.random() * Math.min(3, data.results.length))];
-      return { emoji: pick.emoji, name: place.name, type: pick.label };
+    const [restRes, golfRes, attrRes, lodgeRes, brewRes] = await Promise.all([
+      fetch(`${base}?location=${lat},${lng}&radius=${radius}&type=restaurant&key=${GOOGLE_KEY}`),
+      fetch(`${base}?location=${lat},${lng}&radius=${radius}&keyword=golf+course&key=${GOOGLE_KEY}`),
+      fetch(`${base}?location=${lat},${lng}&radius=${radius}&type=tourist_attraction&key=${GOOGLE_KEY}`),
+      fetch(`${base}?location=${lat},${lng}&radius=${radius}&type=lodging&key=${GOOGLE_KEY}`),
+      fetch(`${base}?location=${lat},${lng}&radius=${radius}&keyword=brewery+winery&key=${GOOGLE_KEY}`),
+    ]);
+    const [restData, golfData, attrData, lodgeData, brewData] = await Promise.all([
+      restRes.json(), golfRes.json(), attrRes.json(), lodgeRes.json(), brewRes.json(),
+    ]);
+
+    function bestPlace(results: any[]): any | null {
+      return (results || [])
+        .filter(p => !isGenericPlace(p.name) && (p.rating || 0) >= 4.0)
+        .sort((a, b) => scorePlaceQuality(b) - scorePlaceQuality(a))[0] ?? null;
     }
-  } catch {}
-  return null;
+
+    const bestGolf  = bestPlace(golfData.results);
+    const bestBrew  = bestPlace(brewData.results);
+    const bestAttr  = bestPlace(attrData.results);
+    const bestRest  = bestPlace(restData.results);
+    const bestLodge = bestPlace(lodgeData.results);
+
+    const bullets: string[] = [];
+
+    if (bestGolf && bullets.length < 2)
+      bullets.push(`⛳ Fly-out golf — ${bestGolf.name} is a short drive from the ramp`);
+
+    if (bestBrew && bullets.length < 2)
+      bullets.push(`🍺 ${bestBrew.name} — local craft stop worth the flight`);
+
+    if (bestAttr && bullets.length < 2) {
+      if (isScenic(bestAttr))
+        bullets.push(`🏔 Scenic area — ${bestAttr.name} is close to the field`);
+      else
+        bullets.push(`🎯 ${bestAttr.name} — popular local destination, easy from the ramp`);
+    }
+
+    if (bestRest && bullets.length < 2) {
+      const wellReviewed = (bestRest.user_ratings_total || 0) > 400;
+      bullets.push(`🍽 ${bestRest.name} — ${wellReviewed ? 'well-reviewed fly-in lunch spot' : 'solid dining a short drive away'}`);
+    }
+
+    if (bestLodge && bullets.length < 2)
+      bullets.push(`🏨 Overnighter-friendly — ${bestLodge.name} is close to the field`);
+
+    // Elevation context — mention if notably high
+    const elev = Number(airport.elevation);
+    if (bullets.length < 2 && elev >= 4000)
+      bullets.push(`📍 High-elevation field at ${elev.toLocaleString()} ft — mountain flying territory`);
+
+    // Fallbacks that still read like a pilot recommendation
+    if (bullets.length === 0) {
+      const anyRest = (restData.results || []).find((p: any) => !isGenericPlace(p.name));
+      if (anyRest)
+        bullets.push(`🍽 ${anyRest.name} — grab a meal close to the field`);
+      else
+        bullets.push('✈️ Solid fuel stop — straightforward pattern, fuel on field');
+    }
+    if (bullets.length === 1) {
+      const hasLodging = (lodgeData.results || []).length > 0;
+      bullets.push(hasLodging
+        ? '🛏 Overnight options available — works as a cross-country waypoint'
+        : '✈️ Good cross-country stop — fuel on field, easy in and out');
+    }
+
+    return bullets.slice(0, 2);
+  } catch {
+    return ['✈️ Fuel available on field', '✈️ Good cross-country stop'];
+  }
 }
 
 export default function SurpriseMe() {
@@ -69,7 +163,6 @@ export default function SurpriseMe() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [cruiseSpeed, setCruiseSpeed] = useState(150);
-  const [interests, setInterests] = useState<string[]>([]);
   const router = useRouter();
 
   useEffect(() => {
@@ -77,7 +170,6 @@ export default function SurpriseMe() {
       if (data) {
         const profile = JSON.parse(data);
         if (profile.cruise_speed) setCruiseSpeed(profile.cruise_speed);
-        if (profile.interests) setInterests(profile.interests);
       }
     });
   }, []);
@@ -101,7 +193,7 @@ export default function SurpriseMe() {
 
       const candidates = airports.filter(a => {
         const d = getDistanceNm(userLat, userLng, a.lat, a.lng);
-        return d >= minNm && d <= maxNm && a.fuel;
+        return d >= minNm && d <= maxNm && a.fuel && a.lat && a.lng;
       });
 
       if (candidates.length === 0) {
@@ -110,13 +202,23 @@ export default function SurpriseMe() {
         return;
       }
 
-      const airport = candidates[Math.floor(Math.random() * candidates.length)];
+      // Prefer higher-quality airports (longer runway, towered, city nearby)
+      const scored = candidates
+        .map(a => ({ ...a, _quality: scoreAirportQuality(a) }))
+        .sort((a: any, b: any) => b._quality - a._quality);
+      const poolSize = Math.max(8, Math.floor(scored.length * 0.35));
+      const pool = scored.slice(0, poolSize);
+      const airport = pool[Math.floor(Math.random() * pool.length)];
+
       const distNm = Math.round(getDistanceNm(userLat, userLng, airport.lat, airport.lng));
       const distMiles = Math.round(getDistanceMiles(userLat, userLng, airport.lat, airport.lng));
-      const flightTime = (distNm / cruiseSpeed).toFixed(1);
-      const highlight = await fetchHighlight(airport.lat, airport.lng, interests);
+      const rawHours = distNm / cruiseSpeed;
+      const h = Math.floor(rawHours);
+      const m = Math.round((rawHours - h) * 60);
+      const flightTime = h === 0 ? `${m}m` : m === 0 ? `${h}h` : `${h}h ${m}m`;
+      const whySummary = await fetchDestinationSummary(airport, airport.lat, airport.lng);
 
-      setResult({ airport, distNm, distMiles, flightTime, highlight });
+      setResult({ airport, distNm, distMiles, flightTime, whySummary });
     } catch (e) {
       Alert.alert('Error', 'Something went wrong. Try again.');
     }
@@ -202,7 +304,7 @@ export default function SurpriseMe() {
               <View style={styles.resultCard}>
                 <View style={styles.resultHeader}>
                   <Text style={styles.resultIcao}>{result.airport.icao || result.airport.id}</Text>
-                  <Text style={styles.resultBadge}>✈️ {result.flightTime} hrs</Text>
+                  <Text style={styles.resultBadge}>✈️ {result.flightTime}</Text>
                 </View>
                 <Text style={styles.resultName}>{result.airport.name}</Text>
                 <Text style={styles.resultCity}>{result.airport.city}, {result.airport.state}</Text>
@@ -213,7 +315,7 @@ export default function SurpriseMe() {
                     <Text style={styles.statLabel}>Distance</Text>
                   </View>
                   <View style={styles.statBox}>
-                    <Text style={styles.statValue}>{result.flightTime} hrs</Text>
+                    <Text style={styles.statValue}>{result.flightTime}</Text>
                     <Text style={styles.statLabel}>Flight Time</Text>
                   </View>
                   <View style={styles.statBox}>
@@ -224,17 +326,16 @@ export default function SurpriseMe() {
 
                 {result.airport.fuel && (
                   <View style={styles.fuelPill}>
-                    <Text style={styles.fuelPillText}>⛽ {result.airport.fuel}</Text>
+                    <Text style={styles.fuelPillText}>⛽ {formatFuel(result.airport.fuel)}</Text>
                   </View>
                 )}
 
-                {result.highlight && (
-                  <View style={styles.highlightBox}>
-                    <Text style={styles.highlightEmoji}>{result.highlight.emoji}</Text>
-                    <View style={styles.highlightText}>
-                      <Text style={styles.highlightLabel}>NEARBY {result.highlight.type.toUpperCase()}</Text>
-                      <Text style={styles.highlightName}>{result.highlight.name}</Text>
-                    </View>
+                {result.whySummary?.length > 0 && (
+                  <View style={styles.whyBox}>
+                    <Text style={styles.whyLabel}>WHY FLY HERE</Text>
+                    {result.whySummary.map((line: string, i: number) => (
+                      <Text key={i} style={styles.whyBullet}>{line}</Text>
+                    ))}
                   </View>
                 )}
 
@@ -310,11 +411,9 @@ const styles = StyleSheet.create({
   statLabel: { fontSize: 11, color: '#4A5B73', marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.8 },
   fuelPill: { backgroundColor: '#111827', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, alignSelf: 'flex-start', marginBottom: 14 },
   fuelPillText: { fontSize: 13, color: '#22C55E', fontWeight: '700' },
-  highlightBox: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#111827', borderRadius: 12, padding: 14, marginBottom: 16 },
-  highlightEmoji: { fontSize: 28 },
-  highlightText: { flex: 1 },
-  highlightLabel: { fontSize: 10, color: '#4A5B73', fontWeight: '700', letterSpacing: 1.2, marginBottom: 3 },
-  highlightName: { fontSize: 15, fontWeight: '700', color: '#F0F4FF' },
+  whyBox: { backgroundColor: '#111827', borderRadius: 12, padding: 14, marginBottom: 16, gap: 8 },
+  whyLabel: { fontSize: 10, color: '#4A5B73', fontWeight: '700', letterSpacing: 1.2, marginBottom: 2 },
+  whyBullet: { fontSize: 14, color: '#C8D8EC', lineHeight: 20 },
   resultActions: { flexDirection: 'row', gap: 10 },
   viewBtn: { flex: 1, backgroundColor: '#38BDF8', borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
   viewBtnText: { color: '#0D1421', fontSize: 15, fontWeight: '800' },

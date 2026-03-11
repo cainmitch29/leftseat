@@ -6,10 +6,11 @@ import {
   ScrollView, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
 import airportsData from '../assets/images/airports.json';
+import { getWhyFlyHere } from '../utils/whyFlyHere';
 import WeatherWidget from '../components/WeatherWidget';
 import { supabase } from '../lib/supabase';
 
-const GOOGLE_KEY = 'AIzaSyAP7EitXnoZAhammN6w1RhvFJ2DoZnfd1k';
+import { GOOGLE_KEY } from '../utils/config';
 const airports: any[] = airportsData as any[];
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -37,27 +38,11 @@ function formatFlightTime(nm: number, speedKts: number): string {
   return `${h}h ${m}m`;
 }
 
-// ─── Why Fly Here content by category ───────────────────────────────────────
 
-const WHY_FLY: Record<string, string[]> = {
-  beach:    ['Beach is minutes from the ramp', 'Stunning ocean approach on final', 'World-class seafood restaurants nearby', 'Easy GA parking and FBO service'],
-  ski:      ['Ski resort shuttle from the terminal', 'Incredible mountain scenery on approach', 'World-class après-ski dining', 'High-altitude flying experience'],
-  mountains:['Dramatic mountain approach and departure', 'Gateway to national parks and backcountry', 'Challenging and rewarding flying', 'Scenic high-country adventure'],
-  golf:     ['Top-tier courses within minutes of the ramp', 'Coastal views on final approach', 'Premium dining and wine country nearby', 'Easy ground transport to courses'],
-  nature:   ['Gateway to Yellowstone and Big Sky country', 'Wildlife viewing year-round', 'Unmatched scenery on every departure', 'Rugged outdoor adventure awaits'],
-  tropical: ['Fly to the southernmost runway in the US', 'Warm flying weather year-round', 'Beautiful island scenery on approach', 'Vibrant waterfront dining and nightlife'],
-  city:     ['Urban flying with stunning skyline views', 'World-class dining and culture', 'Well-equipped FBO with fast service', 'Easy access to downtown'],
-  food:     ['Renowned restaurant scene nearby', 'Worth the flight for the food alone', 'Great FBO with pilot-friendly crew', 'Easy GA access to a foodie destination'],
-  camping:  ['Trailhead access from the ramp', 'True backcountry flying experience', 'Minimal traffic, maximum adventure', 'Stars you can only see from the wilderness'],
-  brewery:  ['Local craft brewery within walking distance', 'Small-town charm and hospitality', 'Scenic approach and quiet pattern', 'A destination worth repeating'],
-};
-
-const DEFAULT_WHY = [
-  'Unique destination for GA pilots',
-  'Well-maintained GA ramp and FBO',
-  'Great local dining and activities nearby',
-  'A flight worth making',
-];
+const FUEL_LABELS: Record<string, string> = { A: 'Jet A', 'A+': 'Jet A+', B: 'Jet B' };
+function formatFuel(fuel: string): string {
+  return fuel.split(',').map(f => FUEL_LABELS[f.trim()] ?? f.trim()).join(' / ');
+}
 
 // ─── Screen ──────────────────────────────────────────────────────────────────
 
@@ -80,7 +65,7 @@ export default function AirportScreen() {
 
   const {
     icao, name, city, state, lat, lng, elevation, fuel,
-    runways: runwaysParam, description, category,
+    runways: runwaysParam, description,
   } = useLocalSearchParams();
 
   const airport = {
@@ -94,7 +79,19 @@ export default function AirportScreen() {
   const airportLat = lat ? parseFloat(lat as string) : null;
   const airportLng = lng ? parseFloat(lng as string) : null;
 
-  const whyBullets: string[] = WHY_FLY[(category as string) || ''] || DEFAULT_WHY;
+  const fullAirport = airports.find(
+    (a: any) => (a.icao || a.faa || a.id)?.toUpperCase() === (icao as string)?.toUpperCase()
+  );
+  const hasPlacesData = !placesLoading && (
+    places.restaurants.length > 0 || places.hotels.length > 0 ||
+    places.golf.length > 0 || places.things.length > 0
+  );
+  const whyBullets: string[] = getWhyFlyHere(
+    fullAirport ?? {
+      fuel, runways: runwaysParam ? (() => { try { return JSON.parse(runwaysParam as string); } catch { return []; } })() : [],
+    },
+    hasPlacesData ? places : undefined,
+  );
 
   // ── Effects ───────────────────────────────────────────────────────────────
 
@@ -322,7 +319,7 @@ export default function AirportScreen() {
             </View>
           )}
           <View style={styles.heroMeta}>
-            <View style={styles.metaPill}><Text style={styles.metaText}>⛽ {airport.fuel}</Text></View>
+            <View style={styles.metaPill}><Text style={styles.metaText}>⛽ {formatFuel(String(airport.fuel))}</Text></View>
             <View style={styles.metaPill}><Text style={styles.metaText}>📏 {airport.elevation}</Text></View>
           </View>
         </View>
@@ -446,7 +443,7 @@ export default function AirportScreen() {
                 <Text style={styles.fboIcon}>🏢</Text>
                 <View style={styles.fboInfo}>
                   <Text style={styles.fboName}>Fixed Base Operator</Text>
-                  <Text style={styles.fboDetail}>Fuel: {airport.fuel}</Text>
+                  <Text style={styles.fboDetail}>Fuel: {formatFuel(String(airport.fuel))}</Text>
                   <Text style={styles.fboDetail}>Pilot lounge · Courtesy car · Self-serve available</Text>
                 </View>
               </View>

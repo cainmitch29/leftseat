@@ -2,13 +2,48 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import {
-  ImageBackground, ScrollView, StyleSheet, Text,
+  Image, ImageBackground, ScrollView, StyleSheet, Text,
   TextInput, TouchableOpacity, View,
 } from 'react-native';
 import airportsData from '../../assets/images/airports.json';
 import SurpriseMe from '../../components/SurpriseMe';
 
 const airports: any[] = airportsData as any[];
+import { GOOGLE_KEY } from '../../utils/config';
+
+// Small self-contained thumbnail — fetches the same photo source as the airport detail hero.
+// locationbias anchors the Places search to the airport's actual coordinates so we get
+// the right airport even when the name is generic (e.g. "Regional Airport").
+function AirportThumb({ name, lat, lng }: { name: string; lat?: number; lng?: number }) {
+  const [uri, setUri] = useState<string | null>(null);
+  useEffect(() => {
+    const query = encodeURIComponent(`${name} airport`);
+    const bias = lat && lng ? `&locationbias=circle:30000@${lat},${lng}` : '';
+    fetch(`https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${query}&inputtype=textquery&fields=photos${bias}&key=${GOOGLE_KEY}`)
+      .then(r => r.json())
+      .then(data => {
+        const ref = data.candidates?.[0]?.photos?.[0]?.photo_reference;
+        if (ref) setUri(`https://maps.googleapis.com/maps/api/place/photo?maxwidth=120&photoreference=${ref}&key=${GOOGLE_KEY}`);
+      })
+      .catch(() => {});
+  }, [name]);
+
+  if (!uri) {
+    return (
+      <View style={thumbStyles.placeholder}>
+        <Text style={thumbStyles.icon}>✈️</Text>
+      </View>
+    );
+  }
+  return <Image source={{ uri }} style={thumbStyles.img} resizeMode="cover" />;
+}
+
+const thumbStyles = StyleSheet.create({
+  img: { width: 56, height: 56, borderRadius: 12, backgroundColor: '#0D1421' },
+  placeholder: { width: 56, height: 56, borderRadius: 12, backgroundColor: '#111827', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#1E2D45' },
+  icon: { fontSize: 22 },
+});
+
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
@@ -29,6 +64,40 @@ function formatFlightTime(nm: number, speedKts: number): string {
   if (h === 0) return `${m}m`;
   if (m === 0) return `${h}h`;
   return `${h}h ${m}m`;
+}
+
+const FUEL_LABELS: Record<string, string> = { A: 'Jet A', 'A+': 'Jet A+', B: 'Jet B' };
+function formatFuel(fuel: string): string {
+  return fuel.split(',').map(f => FUEL_LABELS[f.trim()] ?? f.trim()).join(' / ');
+}
+
+// Generate a short pilot-relevant destination hint from static airport fields only.
+function getDestinationHint(a: any): string {
+  const combined = `${a.name || ''} ${a.city || ''}`.toLowerCase();
+  const rl = a.runways?.length ? Math.max(...a.runways.map((r: any) => r.length || 0)) : 0;
+  const elev = Number(a.elevation) || 0;
+  const hasFuel = !!a.fuel;
+  const towered = a.has_tower === 'ATCT';
+
+  if (['beach', 'shore', 'coast', 'ocean', 'gulf'].some(k => combined.includes(k)))
+    return 'Coastal fly-out — beach within a short drive';
+  if (elev >= 5000 || ['mountain', 'alpine', 'summit', 'peak'].some(k => combined.includes(k)))
+    return `Mountain flying — scenic terrain around ${elev.toLocaleString()} ft`;
+  if (elev >= 3000)
+    return 'Elevated terrain — good VFR with mountain views';
+  if (['lake', 'harbor', 'bay', 'river', 'falls', 'creek'].some(k => combined.includes(k)))
+    return 'Waterfront area — great excuse to tie down and explore';
+  if (hasFuel && rl >= 5000 && towered)
+    return 'Towered field with fuel — well-equipped stop on any cross-country';
+  if (hasFuel && rl >= 5000)
+    return 'Fuel and long runway — fits most GA aircraft';
+  if (hasFuel && towered)
+    return 'Towered field with fuel on site';
+  if (hasFuel)
+    return 'Fuel on field — handy stop between legs';
+  if (rl >= 4000)
+    return 'Long runway with minimal traffic';
+  return 'Quiet GA field — uncrowded pattern';
 }
 
 function getGreeting(): string {
@@ -483,20 +552,22 @@ export default function DiscoverScreen() {
                     onPress={() => goToAirport(airport)}
                     activeOpacity={0.8}
                   >
-                    <View style={styles.flightCardLeft}>
+                    <AirportThumb name={airport.name} lat={airport.lat} lng={airport.lng} />
+                    <View style={[styles.flightCardLeft, { marginLeft: 12 }]}>
                       <Text style={styles.flightCardIcao}>{airport.icao || airport.id}</Text>
                       <Text style={styles.flightCardName} numberOfLines={1}>{airport.name}</Text>
                       <Text style={styles.flightCardCity}>{airport.city}, {airport.state}</Text>
+                      <Text style={styles.flightCardHint} numberOfLines={1}>{getDestinationHint(airport)}</Text>
                       <View style={styles.flightCardMeta}>
-                        {airport.fuel && <Text style={styles.flightCardTag}>⛽ {airport.fuel}</Text>}
+                        {airport.fuel && <Text style={styles.flightCardTag}>⛽ {formatFuel(airport.fuel)}</Text>}
                         {airport.elevation && (
                           <Text style={styles.flightCardTag}>📏 {airport.elevation} ft</Text>
                         )}
                       </View>
                     </View>
                     <View style={styles.flightCardRight}>
-                      <Text style={styles.flightCardDist}>{airport.distNm} nm</Text>
                       <Text style={styles.flightCardTime}>{airport.flightTime}</Text>
+                      <Text style={styles.flightCardDist}>{airport.distNm} nm</Text>
                       <Text style={styles.flightCardArrow}>›</Text>
                     </View>
                   </TouchableOpacity>
@@ -637,17 +708,18 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5, marginBottom: 3,
   },
   flightCardName: { fontSize: 15, fontWeight: '700', color: '#F0F4FF', marginBottom: 2 },
-  flightCardCity: { fontSize: 12, color: '#4A5B73', marginBottom: 8 },
+  flightCardCity: { fontSize: 12, color: '#4A5B73', marginBottom: 4 },
+  flightCardHint: { fontSize: 11, color: '#5A7A96', marginBottom: 8 },
   flightCardMeta: { flexDirection: 'row', gap: 12 },
   flightCardTag: { fontSize: 11, color: '#3A5070' },
   flightCardRight: { alignItems: 'flex-end', gap: 2, paddingLeft: 12 },
-  flightCardDist: { fontSize: 17, fontWeight: '800', color: '#F0F4FF' },
-  flightCardTime: { fontSize: 12, color: '#60CEFF', fontWeight: '600', marginBottom: 6 },
+  flightCardTime: { fontSize: 18, fontWeight: '800', color: '#F0F4FF' },
+  flightCardDist: { fontSize: 12, color: '#4A5B73', fontWeight: '500', marginBottom: 6 },
   flightCardArrow: { fontSize: 22, color: '#1E3A5A' },
 
   // Destination image grid
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 },
-  card: { width: '47%', height: 196, borderRadius: 18, overflow: 'hidden' },
+  card: { width: '47%', height: 200, borderRadius: 18, overflow: 'hidden' },
   cardBg: { flex: 1, justifyContent: 'space-between' },
   cardBgImage: { borderRadius: 18 },
   cardDim: {
