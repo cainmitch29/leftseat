@@ -692,6 +692,8 @@ export default function DiscoverScreen() {
   const [discoverMode, setDiscoverMode] = useState<'discover' | 'feed'>('discover');
   const [feedItems, setFeedItems] = useState<any[]>([]);
   const [feedLoading, setFeedLoading] = useState(false);
+  const [likedPostIds, setLikedPostIds] = useState<Set<string>>(new Set());
+  const [postLikeCounts, setPostLikeCounts] = useState<Record<string, number>>({});
   const scrollY = useRef(new Animated.Value(0)).current;
   const [refPt, setRefPt] = useState<{ lat: number; lng: number } | null>(null);
 
@@ -853,20 +855,25 @@ export default function DiscoverScreen() {
         .select('following_id')
         .eq('follower_id', user.id);
       const followedIds = (follows ?? []).map(f => f.following_id);
-      if (followedIds.length === 0) { setFeedItems([]); setFeedLoading(false); return; }
+      const feedIds = [...new Set([user.id, ...followedIds])];
 
-      // Get their recent flights + reviews
-      const [flightsRes, reviewsRes] = await Promise.all([
+      // Get recent flights + reviews + posts from you + people you follow
+      const [flightsRes, reviewsRes, postsRes] = await Promise.all([
         supabase.from('visited_airports')
           .select('user_id, icao, name, state, visited_at')
-          .in('user_id', followedIds)
+          .in('user_id', feedIds)
           .order('visited_at', { ascending: false })
           .limit(30),
         supabase.from('airport_reviews')
           .select('user_id, airport_icao, visit_reason, notes, created_at')
-          .in('user_id', followedIds)
+          .in('user_id', feedIds)
           .order('created_at', { ascending: false })
           .limit(30),
+        supabase.from('pilot_posts')
+          .select('id, user_id, image_url, caption, airport_icao, created_at')
+          .in('user_id', feedIds)
+          .order('created_at', { ascending: false })
+          .limit(20),
       ]);
 
       const items: any[] = [];
@@ -875,6 +882,9 @@ export default function DiscoverScreen() {
       }
       for (const r of (reviewsRes.data ?? [])) {
         items.push({ type: 'review', user_id: r.user_id, icao: r.airport_icao, label: r.visit_reason?.replace('_', ' ') ?? 'report', notes: r.notes, ts: r.created_at });
+      }
+      for (const p of (postsRes.data ?? [])) {
+        items.push({ type: 'post', user_id: p.user_id, icao: p.airport_icao, imageUrl: p.image_url, caption: p.caption, postId: p.id, ts: p.created_at });
       }
       items.sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
 
@@ -886,24 +896,72 @@ export default function DiscoverScreen() {
         if (!dup) deduped.push(item);
       }
 
-      // Resolve names
+      // Resolve names + profile photos
       const userIds = [...new Set(deduped.map(i => i.user_id))];
       const { data: profiles } = await supabase
         .from('pilot_profiles')
         .select('user_id, name, username, certificate')
         .in('user_id', userIds);
       const profileMap = new Map((profiles ?? []).map(p => [p.user_id, p]));
+
+      // Resolve profile photos from Supabase Storage (batch — usually 1-5 users)
+      const photoMap = new Map<string, string>();
+      await Promise.all(userIds.map(async (uid) => {
+        try {
+          const { data: files } = await supabase.storage.from('profile-photos').list(uid, { limit: 5 });
+          const avatar = (files ?? []).filter(f => f.name.startsWith('avatar')).sort((a, b) => b.name.localeCompare(a.name))[0];
+          if (avatar) {
+            const { data: urlData } = supabase.storage.from('profile-photos').getPublicUrl(`${uid}/${avatar.name}`);
+            photoMap.set(uid, urlData.publicUrl);
+          }
+        } catch {}
+      }));
+
       for (const item of deduped) {
         const p = profileMap.get(item.user_id);
         item.userName = p?.name || p?.username || 'Pilot';
         item.certificate = p?.certificate;
+        item.avatarUrl = photoMap.get(item.user_id) ?? null;
       }
 
-      setFeedItems(deduped.slice(0, 30));
+      const finalItems = deduped.slice(0, 30);
+      setFeedItems(finalItems);
+
+      // Fetch like counts + user's liked posts for all posts in feed
+      const postIds = finalItems.filter(i => i.type === 'post' && i.postId).map(i => i.postId);
+      if (postIds.length > 0) {
+        try {
+          const [allLikes, myLikes] = await Promise.all([
+            supabase.from('post_likes').select('post_id').in('post_id', postIds),
+            user?.id
+              ? supabase.from('post_likes').select('post_id').eq('user_id', user.id).in('post_id', postIds)
+              : Promise.resolve({ data: [] }),
+          ]);
+          const counts: Record<string, number> = {};
+          for (const r of (allLikes.data ?? [])) counts[r.post_id] = (counts[r.post_id] ?? 0) + 1;
+          setPostLikeCounts(counts);
+          setLikedPostIds(new Set((myLikes.data ?? []).map(r => r.post_id)));
+        } catch {}
+      }
     } catch (e: any) {
       if (__DEV__) console.warn('[Feed] error:', e?.message);
     }
     setFeedLoading(false);
+  }
+
+  async function togglePostLike(postId: string) {
+    if (!user?.id) return;
+    const isLiked = likedPostIds.has(postId);
+    // Optimistic update
+    if (isLiked) {
+      setLikedPostIds(prev => { const n = new Set(prev); n.delete(postId); return n; });
+      setPostLikeCounts(prev => ({ ...prev, [postId]: Math.max(0, (prev[postId] ?? 1) - 1) }));
+      supabase.from('post_likes').delete().eq('user_id', user.id).eq('post_id', postId);
+    } else {
+      setLikedPostIds(prev => new Set(prev).add(postId));
+      setPostLikeCounts(prev => ({ ...prev, [postId]: (prev[postId] ?? 0) + 1 }));
+      supabase.from('post_likes').upsert({ user_id: user.id, post_id: postId }, { onConflict: 'user_id,post_id' });
+    }
   }
 
   // Load feed when switching to feed mode
@@ -1512,9 +1570,9 @@ export default function DiscoverScreen() {
             </View>
           ) : feedItems.length === 0 ? (
             <View style={ds.feedEmpty}>
-              <Feather name="users" size={28} color="#2A3A52" />
-              <Text style={ds.feedEmptyTitle}>No activity yet</Text>
-              <Text style={ds.feedEmptyText}>Follow other pilots to see their flights and reports in your feed.</Text>
+              <MaterialCommunityIcons name="airplane-takeoff" size={36} color="#1A2D45" />
+              <Text style={ds.feedEmptyTitle}>Your pilot feed</Text>
+              <Text style={ds.feedEmptyText}>Follow other pilots to see their flights, photos, and stories here.</Text>
               <TouchableOpacity
                 style={ds.feedFindBtn}
                 onPress={() => { setDiscoverMode('discover'); setSearchMode('people'); setSearch(''); setSearchFocused(true); }}
@@ -1525,43 +1583,174 @@ export default function DiscoverScreen() {
               </TouchableOpacity>
             </View>
           ) : (
-            feedItems.map((item, i) => (
-              <TouchableOpacity
-                key={`${item.type}-${item.icao}-${item.user_id}-${i}`}
-                style={ds.feedCard}
-                onPress={() => goToAirport(airports.find(a => aptIdent(a) === item.icao?.toUpperCase()) as Airport)}
-                activeOpacity={0.7}
-              >
-                <View style={ds.feedCardHeader}>
-                  <View style={ds.feedAvatar}>
-                    <Feather name="user" size={14} color="#6B83A0" />
+            feedItems.map((item, i) => {
+
+              // ── Photo post ──────────────────────────────────
+              if (item.type === 'post') {
+                const liked = likedPostIds.has(item.postId);
+                const likeCount = postLikeCounts[item.postId] ?? 0;
+                const apt = item.icao ? airports.find(a => aptIdent(a) === item.icao?.toUpperCase()) : null;
+                return (
+                  <View key={`post-${item.postId}-${i}`} style={ds.postCard}>
+                    {/* Glass highlight edge */}
+                    <View style={ds.postGlassEdge} pointerEvents="none" />
+
+                    {/* ── Header: pilot identity ────────────────── */}
+                    <View style={ds.postHeader}>
+                      <TouchableOpacity
+                        style={ds.postHeaderInner}
+                        onPress={() => router.push({ pathname: '/community-profile', params: { userId: item.user_id } })}
+                        activeOpacity={0.7}
+                      >
+                        {item.avatarUrl ? (
+                          <Image source={{ uri: item.avatarUrl }} style={ds.postAvatar} />
+                        ) : (
+                          <View style={ds.postAvatarFallback}>
+                            <MaterialCommunityIcons name="account" size={16} color="#5C7A96" />
+                          </View>
+                        )}
+                        <View style={{ flex: 1 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
+                            <Text style={ds.postPilotName}>{item.userName}</Text>
+                            {item.certificate && (
+                              <View style={ds.postCertBadge}>
+                                <MaterialCommunityIcons name="shield-check" size={9} color="#38BDF8" />
+                                <Text style={ds.postCertText}>{item.certificate.toUpperCase()}</Text>
+                              </View>
+                            )}
+                          </View>
+                          <Text style={ds.postTime}>{formatActivityTime(item.ts)} ago</Text>
+                        </View>
+                      </TouchableOpacity>
+                    </View>
+
+                    {/* ── Photo — completely untouched ──────────── */}
+                    <Image source={{ uri: item.imageUrl }} style={ds.postImage} />
+
+                    {/* ── Content area below photo ──────────────── */}
+                    <View style={ds.postContent}>
+
+                      {/* Action bar: like + airport */}
+                      <View style={ds.postActionBar}>
+                        <TouchableOpacity
+                          onPress={() => togglePostLike(item.postId)}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          style={ds.postLikeBtn}
+                        >
+                          <View style={[ds.postLikeGlass, liked && ds.postLikeGlassActive]}>
+                            <MaterialCommunityIcons
+                              name={liked ? 'heart' : 'heart-outline'}
+                              size={20}
+                              color={liked ? '#EF4444' : '#5C7A96'}
+                            />
+                          </View>
+                          {likeCount > 0 && (
+                            <Text style={[ds.postLikeCount, liked && { color: '#EF4444' }]}>{likeCount}</Text>
+                          )}
+                        </TouchableOpacity>
+
+                        {item.icao && (
+                          <TouchableOpacity
+                            style={ds.postAirportChip}
+                            onPress={() => goToAirport(apt as Airport)}
+                            activeOpacity={0.7}
+                          >
+                            <MaterialCommunityIcons name="airplane" size={12} color="#38BDF8" />
+                            <Text style={ds.postAirportIcao}>{item.icao}</Text>
+                            {apt?.name && (
+                              <>
+                                <View style={ds.postAirportDot} />
+                                <Text style={ds.postAirportName} numberOfLines={1}>{apt.name}</Text>
+                              </>
+                            )}
+                            <Feather name="chevron-right" size={12} color="#2A3A52" />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+
+                      {/* Caption */}
+                      {item.caption?.trim() && (
+                        <Text style={ds.postCaption}>
+                          <Text style={ds.postCaptionAuthor}>{item.userName} </Text>
+                          {item.caption}
+                        </Text>
+                      )}
+                    </View>
                   </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={ds.feedUserName}>{item.userName}</Text>
-                    {item.certificate && <Text style={ds.feedCert}>{item.certificate}</Text>}
-                  </View>
-                  <Text style={ds.feedTime}>{formatActivityTime(item.ts)}</Text>
-                </View>
-                <View style={ds.feedCardBody}>
-                  <View style={ds.feedActionIcon}>
-                    <Feather name={item.type === 'flight' ? 'navigation' : 'clipboard'} size={13} color={item.type === 'flight' ? '#38BDF8' : '#0D9488'} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={ds.feedActionText}>
-                      {item.type === 'flight' ? 'Flew to ' : 'Reported on '}
-                      <Text style={ds.feedIcao}>{item.icao}</Text>
-                      {item.label && item.state ? ` · ${item.label}, ${item.state}` : item.label ? ` · ${item.label}` : ''}
-                    </Text>
-                    {item.notes?.trim() && (
-                      <Text style={ds.feedNotes} numberOfLines={2}>{item.notes}</Text>
+                );
+              }
+
+              // ── Flight / review card ─────────────────────────
+              const isFlight = item.type === 'flight';
+              const flightApt = airports.find(a => aptIdent(a) === item.icao?.toUpperCase());
+              return (
+                <TouchableOpacity
+                  key={`${item.type}-${item.icao}-${item.user_id}-${i}`}
+                  style={ds.feedCard}
+                  onPress={() => goToAirport(flightApt as Airport)}
+                  activeOpacity={0.75}
+                >
+                  {/* Glass highlight */}
+                  <View style={ds.feedCardGlow} pointerEvents="none" />
+
+                  <View style={ds.feedCardHeader}>
+                    {item.avatarUrl ? (
+                      <Image source={{ uri: item.avatarUrl }} style={ds.feedAvatarImg} />
+                    ) : (
+                      <View style={ds.feedAvatar}>
+                        <MaterialCommunityIcons name="account" size={16} color="#5C7A96" />
+                      </View>
                     )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={ds.feedUserName}>{item.userName}</Text>
+                    </View>
+                    <Text style={ds.feedTimeBelow}>{formatActivityTime(item.ts)}</Text>
                   </View>
-                </View>
-              </TouchableOpacity>
-            ))
+
+                  <View style={ds.feedCardBody}>
+                    <View style={[ds.feedActionIcon, !isFlight && ds.feedActionIconReview]}>
+                      <MaterialCommunityIcons
+                        name={isFlight ? 'airplane' : 'clipboard-text-outline'}
+                        size={16}
+                        color={isFlight ? '#38BDF8' : '#0D9488'}
+                      />
+                    </View>
+                    <View style={{ flex: 1, gap: 3 }}>
+                      <Text style={ds.feedActionText}>
+                        {isFlight ? 'Flew to ' : 'Reported on '}
+                        <Text style={ds.feedIcao}>{item.icao}</Text>
+                      </Text>
+                      {item.label && (
+                        <Text style={ds.feedSubText} numberOfLines={1}>
+                          {item.label}{item.state ? `, ${item.state}` : ''}
+                        </Text>
+                      )}
+                      {item.notes?.trim() && (
+                        <Text style={ds.feedNotes} numberOfLines={2}>{item.notes}</Text>
+                      )}
+                    </View>
+                    <Feather name="chevron-right" size={14} color="#1A2535" />
+                  </View>
+                </TouchableOpacity>
+              );
+            })
           )}
-          <View style={{ height: 50 }} />
+          <View style={{ height: 60 }} />
         </Animated.ScrollView>
+      )}
+
+      {/* ── FAB: Cockpit-style post button ──────────────────────────────── */}
+      {!showSearch && discoverMode === 'feed' && user?.id && (
+        <TouchableOpacity
+          style={ds.fab}
+          onPress={() => router.push('/create-post')}
+          activeOpacity={0.8}
+        >
+          <View style={ds.fabInner}>
+            <MaterialCommunityIcons name="camera-plus" size={22} color="#FFF" />
+          </View>
+        </TouchableOpacity>
       )}
 
       {flyTripEvent && (
@@ -2199,27 +2388,200 @@ const ds = StyleSheet.create({
   feedEmptyText: { fontSize: 14, color: '#6B83A0', textAlign: 'center', lineHeight: 21 },
   feedFindBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: '#1E2D42' },
   feedFindBtnText: { fontSize: 14, fontWeight: '600', color: '#38BDF8' },
+  // ═══════════════════════════════════════════════════════════════════
+  //  COCKPIT FEED — cinematic aviation social
+  // ═══════════════════════════════════════════════════════════════════
+
+  // ── Flight / review cards ─────────────────────────────────────────
   feedCard: {
     marginHorizontal: 16, marginBottom: 12,
-    backgroundColor: 'rgba(10,18,36,0.97)', borderRadius: 14, padding: 14,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(8,15,28,0.92)', borderRadius: 16, padding: 14,
+    borderWidth: 1, borderColor: 'rgba(56,189,248,0.06)',
+    overflow: 'hidden',
   },
-  feedCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
+  feedCardGlow: {
+    position: 'absolute', top: 0, left: 0, right: 0, height: 1,
+    backgroundColor: 'rgba(56,189,248,0.08)',
+  },
+  feedCardHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10,
+  },
   feedAvatar: {
-    width: 32, height: 32, borderRadius: 16, backgroundColor: '#0A1628',
-    alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#1E2D42',
+    width: 34, height: 34, borderRadius: 17,
+    backgroundColor: '#0D1628',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#1E2D42',
   },
-  feedUserName: { fontSize: 14, fontWeight: '700', color: '#F0F4FF' },
-  feedCert: { fontSize: 11, color: '#4A5B73' },
-  feedTime: { fontSize: 11, color: '#4A5B73' },
-  feedCardBody: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  feedAvatarImg: {
+    width: 34, height: 34, borderRadius: 17,
+    borderWidth: 1, borderColor: '#1E2D42',
+  },
+  feedUserName: { fontSize: 14, fontWeight: '700', color: '#E0E8F5' },
+  feedTimeBelow: { fontSize: 11, color: '#3A4A5F', fontVariant: ['tabular-nums'] as any },
+  feedCardBody: {
+    flexDirection: 'row', alignItems: 'center', gap: 11,
+    backgroundColor: 'rgba(56,189,248,0.03)',
+    borderRadius: 12, padding: 12,
+    borderWidth: 1, borderColor: 'rgba(56,189,248,0.05)',
+  },
   feedActionIcon: {
-    width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(56,189,248,0.06)',
-    alignItems: 'center', justifyContent: 'center', marginTop: 1,
+    width: 36, height: 36, borderRadius: 10,
+    backgroundColor: 'rgba(56,189,248,0.08)',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: 'rgba(56,189,248,0.12)',
   },
-  feedActionText: { fontSize: 14, color: '#C8D8EE', lineHeight: 20 },
-  feedIcao: { fontWeight: '700', color: '#38BDF8' },
-  feedNotes: { fontSize: 12, color: '#6B83A0', lineHeight: 18, marginTop: 4 },
+  feedActionIconReview: {
+    backgroundColor: 'rgba(13,148,136,0.08)',
+    borderColor: 'rgba(13,148,136,0.12)',
+  },
+  feedActionText: { fontSize: 14, fontWeight: '600', color: '#D8E4F0' },
+  feedIcao: { fontWeight: '800', color: '#FBBF24', letterSpacing: 0.5 },
+  feedSubText: { fontSize: 12, color: '#5C7A96' },
+  feedNotes: {
+    fontSize: 12, color: '#6B83A0', lineHeight: 18,
+    fontStyle: 'italic',
+  },
+
+  // ══════════════════════════════════════════════════════════════════
+  //  POST CARD — glass cockpit instrument panel
+  //
+  //  Palette:
+  //    Panel base     #08101E   deep navy glass
+  //    Glass border   rgba(100,170,255,0.12)  faint blue bezel
+  //    Glass glow     rgba(140,200,255,0.06)  inner catch-light
+  //    Text bright    #F2F6FF
+  //    Text mid       #9BB0C8
+  //    Text dim       #4A6178
+  //    Accent blue    #3CC0FF   controls & ICAO
+  //    Accent red     #FF4060   liked heart
+  // ══════════════════════════════════════════════════════════════════
+
+  postCard: {
+    marginHorizontal: 16, marginBottom: 24,
+    backgroundColor: '#08101E',
+    borderRadius: 22,
+    borderWidth: 1.5, borderColor: 'rgba(100,170,255,0.12)',
+    overflow: 'hidden',
+    // Elevation — lifts card off the feed
+    shadowColor: '#000', shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.55, shadowRadius: 24, elevation: 12,
+  },
+  postGlassEdge: {
+    position: 'absolute', top: 0, left: 0, right: 0, height: 1,
+    backgroundColor: 'rgba(140,200,255,0.09)',
+    zIndex: 2,
+  },
+
+  // ── Header ─────────────────────────────────────────────────────────
+  postHeader: {
+    paddingHorizontal: 16, paddingTop: 16, paddingBottom: 14,
+    // subtle glass ground for the header
+    borderBottomWidth: 1, borderBottomColor: 'rgba(100,170,255,0.05)',
+  },
+  postHeaderInner: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+  },
+  postAvatar: {
+    width: 40, height: 40, borderRadius: 20,
+    borderWidth: 2, borderColor: 'rgba(60,192,255,0.25)',
+  },
+  postAvatarFallback: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: '#0C1628',
+    borderWidth: 2, borderColor: 'rgba(60,192,255,0.15)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  postPilotName: {
+    fontSize: 16, fontWeight: '800', color: '#F2F6FF', letterSpacing: -0.2,
+  },
+  postTime: {
+    fontSize: 11, color: '#4A6178', marginTop: 2,
+    fontVariant: ['tabular-nums'] as any,
+  },
+  postCertBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: 'rgba(60,192,255,0.08)',
+    borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3,
+    borderWidth: 1, borderColor: 'rgba(60,192,255,0.20)',
+  },
+  postCertText: {
+    fontSize: 9, fontWeight: '800', color: '#3CC0FF',
+    letterSpacing: 0.8,
+  },
+
+  // ── Photo — COMPLETELY UNTOUCHED, no overlays ──────────────────────
+  postImage: {
+    width: '100%',
+    aspectRatio: 4 / 3,
+  },
+
+  // ── Content below photo ────────────────────────────────────────────
+  postContent: {
+    paddingHorizontal: 16, paddingTop: 14, paddingBottom: 18,
+    gap: 12,
+    // subtle glass inner glow from top
+    backgroundColor: 'rgba(140,200,255,0.015)',
+  },
+
+  // Action bar
+  postActionBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+  },
+  postLikeBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 7,
+  },
+  postLikeGlass: {
+    width: 38, height: 38, borderRadius: 12,
+    backgroundColor: 'rgba(140,200,255,0.04)',
+    borderWidth: 1, borderColor: 'rgba(140,200,255,0.10)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  postLikeGlassActive: {
+    backgroundColor: 'rgba(255,64,96,0.10)',
+    borderColor: 'rgba(255,64,96,0.25)',
+  },
+  postLikeCount: {
+    fontSize: 14, fontWeight: '800', color: '#7A96B0',
+  },
+
+  // Airport chip — prominent, tappable
+  postAirportChip: {
+    flex: 1,
+    flexDirection: 'row', alignItems: 'center', gap: 7,
+    backgroundColor: 'rgba(60,192,255,0.06)',
+    borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10,
+    borderWidth: 1, borderColor: 'rgba(60,192,255,0.14)',
+  },
+  postAirportIcao: {
+    fontSize: 14, fontWeight: '900', color: '#3CC0FF', letterSpacing: 1.0,
+  },
+  postAirportDot: {
+    width: 3, height: 3, borderRadius: 1.5, backgroundColor: '#1E3A55',
+  },
+  postAirportName: {
+    flex: 1, fontSize: 13, color: '#7A96B0', fontWeight: '500',
+  },
+
+  // Caption — large and bold
+  postCaption: {
+    fontSize: 16, color: '#C8D8EA', lineHeight: 24,
+  },
+  postCaptionAuthor: {
+    fontWeight: '800', color: '#F2F6FF', fontSize: 16,
+  },
+
+  // ── FAB — cockpit glass button ────────────────────────────────────
+  fab: {
+    position: 'absolute', bottom: 90, right: 18,
+  },
+  fabInner: {
+    width: 56, height: 56, borderRadius: 28,
+    backgroundColor: 'rgba(56,189,248,0.90)',
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#38BDF8', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.45, shadowRadius: 16, elevation: 10,
+    borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.20)',
+  },
 
   // (compact activity styles removed — feed now has its own tab)
   dismissBtn: { paddingLeft: 12, paddingVertical: 8 },

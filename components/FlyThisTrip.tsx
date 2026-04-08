@@ -165,9 +165,10 @@ interface Props {
   userId:   string | null;
   saved:    boolean;
   onSave:   () => void;
+  saveCount?: number;
 }
 
-export default function FlyThisTrip({ event, onClose, location, userId, saved, onSave }: Props) {
+export default function FlyThisTrip({ event, onClose, location, userId, saved, onSave, saveCount }: Props) {
   const router = useRouter();
   const [cruiseSpeed,    setCruiseSpeed]    = useState(120);  // kts — default until profile loads
   const [homeAirportKey, setHomeAirportKey] = useState<string | null>(null);
@@ -264,12 +265,15 @@ export default function FlyThisTrip({ event, onClose, location, userId, saved, o
             <Text style={s.headerTitle}>Fly This Trip</Text>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
-            <TouchableOpacity onPress={onSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <TouchableOpacity onPress={onSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
               <MaterialCommunityIcons
                 name={saved ? 'bookmark' : 'bookmark-outline'}
                 size={24}
-                color={saved ? ORANGE : '#6B83A0'}
+                color={saved ? '#FBBF24' : '#6B83A0'}
               />
+              {(saveCount ?? 0) > 0 && (
+                <Text style={{ fontSize: 12, fontWeight: '700', color: saved ? '#FBBF24' : '#4A5B73' }}>{saveCount}</Text>
+              )}
             </TouchableOpacity>
             <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Feather name="x" size={22} color="#6B83A0" />

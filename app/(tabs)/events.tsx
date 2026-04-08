@@ -5,7 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../contexts/AuthContext';
 import { ActivityIndicator, Alert, Animated, Linking, Modal, RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { saveDestination, unsaveDestination, getSavedDestinations } from '../../utils/bucketListStorage';
+import { saveDestination, unsaveDestination } from '../../utils/bucketListStorage';
+import { saveEvent, unsaveEvent, getUserSavedEventIds, getEventSaveCounts } from '../../utils/eventSaves';
 import { fetchCuratedEvents } from '@/utils/gaEvents';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import BackgroundWrapper from '../../components/BackgroundWrapper';
@@ -132,13 +133,14 @@ function calAccentColor(category: string): string {
 }
 
 /** Aviation event card — unified with FestCard glass system */
-function EventCard({ event, onCalendar, onAirport, onSave, onFlyTrip, saved, userLat, userLng }: {
+function EventCard({ event, onCalendar, onAirport, onSave, onFlyTrip, saved, saveCount, userLat, userLng }: {
   event: any;
   onCalendar: () => void;
   onAirport: () => void;
   onSave: () => void;
   onFlyTrip: () => void;
   saved: boolean;
+  saveCount?: number;
   userLat?: number | null;
   userLng?: number | null;
 }) {
@@ -177,12 +179,15 @@ function EventCard({ event, onCalendar, onAirport, onSave, onFlyTrip, saved, use
               <Text style={[ecStyles.countdownTxt, isToday && { color: '#22C55E' }]}>{countdown}</Text>
             </View>
           )}
-          <TouchableOpacity onPress={onSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} activeOpacity={0.7}>
+          <TouchableOpacity onPress={onSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} activeOpacity={0.7} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
             <MaterialCommunityIcons
               name={saved ? 'bookmark' : 'bookmark-outline'}
               size={20}
-              color={saved ? ORANGE : '#3A5472'}
+              color={saved ? '#FBBF24' : '#3A5472'}
             />
+            {(saveCount ?? 0) > 0 && (
+              <Text style={{ fontSize: 11, fontWeight: '700', color: saved ? '#FBBF24' : '#3A5472' }}>{saveCount}</Text>
+            )}
           </TouchableOpacity>
         </View>
       </View>
@@ -297,12 +302,13 @@ const ecStyles = StyleSheet.create({
 });
 
 /** Destination festival card — mirrors EventCard structure exactly */
-function FestCard({ event, onAirport, onSave, onFlyTrip, saved, userLat, userLng }: {
+function FestCard({ event, onAirport, onSave, onFlyTrip, saved, saveCount, userLat, userLng }: {
   event: any;
   onAirport: () => void;
   onSave: () => void;
   onFlyTrip: () => void;
   saved: boolean;
+  saveCount?: number;
   userLat?: number | null;
   userLng?: number | null;
 }) {
@@ -341,12 +347,15 @@ function FestCard({ event, onAirport, onSave, onFlyTrip, saved, userLat, userLng
               <Text style={[fcStyles.countdownTxt, isToday && { color: '#22C55E' }]}>{countdown}</Text>
             </View>
           )}
-          <TouchableOpacity onPress={onSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} activeOpacity={0.7}>
+          <TouchableOpacity onPress={onSave} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} activeOpacity={0.7} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
             <MaterialCommunityIcons
               name={saved ? 'bookmark' : 'bookmark-outline'}
               size={20}
-              color={saved ? accent : '#3A5472'}
+              color={saved ? '#FBBF24' : '#3A5472'}
             />
+            {(saveCount ?? 0) > 0 && (
+              <Text style={{ fontSize: 11, fontWeight: '700', color: saved ? '#FBBF24' : '#3A5472' }}>{saveCount}</Text>
+            )}
           </TouchableOpacity>
         </View>
       </View>
@@ -486,6 +495,7 @@ export default function EventsScreen() {
   const [webViewLoading, setWebViewLoading] = useState(true);
   const [webViewError, setWebViewError] = useState(false);
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
+  const [eventSaveCounts, setEventSaveCounts] = useState<Record<string, number>>({});
   const [visibleFestCount, setVisibleFestCount] = useState(10);
   const [visibleAviationCount, setVisibleAviationCount] = useState(10);
   const [flyTripEvent, setFlyTripEvent] = useState<any | null>(null);
@@ -508,23 +518,33 @@ export default function EventsScreen() {
     fetchEvents();
   }, []);
 
-  // Refresh saved IDs whenever the tab comes back into focus
+  // Refresh saved IDs + community counts whenever the tab comes back into focus
   useFocusEffect(useCallback(() => {
     if (user?.id) {
-      getSavedDestinations(user.id).then(items => {
-        setSavedIds(new Set(items.map(i => i.id)));
-      });
+      getUserSavedEventIds(user.id).then(ids => setSavedIds(ids));
     }
-  }, [user]));
+    // Load community save counts for all loaded events
+    if (events.length > 0) {
+      const ids = events.map((e: any) => String(e.id));
+      getEventSaveCounts(ids).then(counts => setEventSaveCounts(counts));
+    }
+  }, [user, events.length]));
 
   async function toggleSave(event: any, type: 'event' | 'festival') {
     if (!user?.id) { setSignInPrompt(true); return; }
     const itemId = String(event.id);
     if (savedIds.has(itemId)) {
-      await unsaveDestination(user.id, itemId);
+      // Optimistic unsave
       setSavedIds(prev => { const next = new Set(prev); next.delete(itemId); return next; });
+      setEventSaveCounts(prev => ({ ...prev, [itemId]: Math.max(0, (prev[itemId] ?? 1) - 1) }));
+      unsaveEvent(user.id, itemId);
+      unsaveDestination(user.id, itemId);
     } else {
-      await saveDestination(user.id, {
+      // Optimistic save
+      setSavedIds(prev => new Set(prev).add(itemId));
+      setEventSaveCounts(prev => ({ ...prev, [itemId]: (prev[itemId] ?? 0) + 1 }));
+      saveEvent(user.id, itemId, event.event_name ?? '');
+      saveDestination(user.id, {
         id: itemId,
         _type: type,
         event_name: event.event_name,
@@ -536,7 +556,6 @@ export default function EventsScreen() {
         category: event.category,
         event_link: event.event_link,
       });
-      setSavedIds(prev => new Set(prev).add(itemId));
     }
   }
 
@@ -954,7 +973,7 @@ export default function EventsScreen() {
                     </View>
                     <View style={{ gap: 14 }}>
                       {festFiltered.slice(0, visibleFestCount).map(event => (
-                        <FestCard key={event.id} event={event} onAirport={() => router.push({ pathname: '/airport', params: { icao: event.nearest_airport } })} onSave={() => toggleSave(event, 'festival')} onFlyTrip={() => setFlyTripEvent(event)} saved={savedIds.has(String(event.id))} userLat={userLat} userLng={userLng} />
+                        <FestCard key={event.id} event={event} onAirport={() => router.push({ pathname: '/airport', params: { icao: event.nearest_airport } })} onSave={() => toggleSave(event, 'festival')} onFlyTrip={() => setFlyTripEvent(event)} saved={savedIds.has(String(event.id))} saveCount={eventSaveCounts[String(event.id)] ?? 0} userLat={userLat} userLng={userLng} />
                       ))}
                     </View>
                   </View>
@@ -976,7 +995,7 @@ export default function EventsScreen() {
                       </View>
                       <View style={{ gap: 14, marginBottom: 28 }}>
                         {thisWeek.slice(0, weekVisible).map(event => (
-                          <FestCard key={event.id} event={event} onAirport={() => router.push({ pathname: '/airport', params: { icao: event.nearest_airport } })} onSave={() => toggleSave(event, 'festival')} onFlyTrip={() => setFlyTripEvent(event)} saved={savedIds.has(String(event.id))} userLat={userLat} userLng={userLng} />
+                          <FestCard key={event.id} event={event} onAirport={() => router.push({ pathname: '/airport', params: { icao: event.nearest_airport } })} onSave={() => toggleSave(event, 'festival')} onFlyTrip={() => setFlyTripEvent(event)} saved={savedIds.has(String(event.id))} saveCount={eventSaveCounts[String(event.id)] ?? 0} userLat={userLat} userLng={userLng} />
                         ))}
                       </View>
                     </>
@@ -990,7 +1009,7 @@ export default function EventsScreen() {
                       </View>
                       <View style={{ gap: 14 }}>
                         {upcoming.slice(0, upcomingVisible).map(event => (
-                          <FestCard key={event.id} event={event} onAirport={() => router.push({ pathname: '/airport', params: { icao: event.nearest_airport } })} onSave={() => toggleSave(event, 'festival')} onFlyTrip={() => setFlyTripEvent(event)} saved={savedIds.has(String(event.id))} userLat={userLat} userLng={userLng} />
+                          <FestCard key={event.id} event={event} onAirport={() => router.push({ pathname: '/airport', params: { icao: event.nearest_airport } })} onSave={() => toggleSave(event, 'festival')} onFlyTrip={() => setFlyTripEvent(event)} saved={savedIds.has(String(event.id))} saveCount={eventSaveCounts[String(event.id)] ?? 0} userLat={userLat} userLng={userLng} />
                         ))}
                       </View>
                     </>
@@ -1045,6 +1064,7 @@ export default function EventsScreen() {
                             onSave={() => toggleSave(event, 'event')}
                             onFlyTrip={() => setFlyTripEvent(event)}
                             saved={savedIds.has(String(event.id))}
+                            saveCount={eventSaveCounts[String(event.id)] ?? 0}
                             userLat={userLat}
                             userLng={userLng}
                           />
@@ -1073,6 +1093,7 @@ export default function EventsScreen() {
                             onSave={() => toggleSave(event, 'event')}
                             onFlyTrip={() => setFlyTripEvent(event)}
                             saved={savedIds.has(String(event.id))}
+                            saveCount={eventSaveCounts[String(event.id)] ?? 0}
                             userLat={userLat}
                             userLng={userLng}
                           />
@@ -1098,6 +1119,7 @@ export default function EventsScreen() {
           userId={user?.id ?? null}
           saved={savedIds.has(String(flyTripEvent.id))}
           onSave={() => toggleSave(flyTripEvent, AVIATION_TYPES.has(flyTripEvent.category) ? 'event' : 'festival')}
+          saveCount={eventSaveCounts[String(flyTripEvent.id)] ?? 0}
         />
       )}
 

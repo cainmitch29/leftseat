@@ -19,6 +19,8 @@ import AirportReviewModal from '../components/AirportReviewModal';
 import { supabase } from '../lib/supabase';
 import { getWhyFlyHere, WhyItem } from '../utils/whyFlyHere';
 import { fetchCuratedEvents } from '../utils/gaEvents';
+import { saveDestination, unsaveDestination, getSavedDestinations } from '../utils/bucketListStorage';
+import { saveEvent, unsaveEvent, getUserSavedEventIds, getEventSaveCounts } from '../utils/eventSaves';
 
 import { GOOGLE_KEY } from '../utils/config';
 import { getCachedCategory, setCachedCategory } from '../utils/placesCache';
@@ -339,6 +341,8 @@ export default function AirportScreen() {
   const [airportInfo, setAirportInfo] = useState<{ ctaf?: string; tower?: string; atis?: string; phone?: string } | null>(null);
   const [nearbyEvents, setNearbyEvents] = useState<any[]>([]);
   const [flyTripEvent, setFlyTripEvent] = useState<any | null>(null);
+  const [savedEventIds, setSavedEventIds] = useState<Set<string>>(new Set());
+  const [eventSaveCounts, setEventSaveCounts] = useState<Record<string, number>>({});
   const [homeIcao, setHomeIcao] = useState<string | null>(null);
   const [distFromHome, setDistFromHome] = useState<{ nm: number; time: string } | null>(null);
   const isHomeAirport = homeIcao != null && homeIcao === (icao as string)?.toUpperCase();
@@ -915,7 +919,51 @@ export default function AirportScreen() {
     for (const e of supabaseEvents) { seen.add(`${(e.event_name||'').trim().toLowerCase()}_${e.start_date}`); merged.push(e); }
     for (const e of curated) { const k = `${e.event_name.trim().toLowerCase()}_${e.start_date}`; if (!seen.has(k)) { seen.add(k); merged.push(e); } }
     merged.sort((a, b) => a.start_date.localeCompare(b.start_date));
-    setNearbyEvents(merged.slice(0, 10));
+    const finalEvents = merged.slice(0, 10);
+    setNearbyEvents(finalEvents);
+
+    // Load saved event IDs + community save counts
+    const eventIds = finalEvents.map((e: any) => String(e.id));
+    try {
+      const [counts, userSaved] = await Promise.all([
+        getEventSaveCounts(eventIds),
+        user?.id ? getUserSavedEventIds(user.id) : Promise.resolve(new Set<string>()),
+      ]);
+      setEventSaveCounts(counts);
+      setSavedEventIds(userSaved);
+    } catch {}
+  }
+
+  async function toggleEventSave(event: any) {
+    if (!user?.id) return;
+    const itemId = String(event.id);
+    if (savedEventIds.has(itemId)) {
+      // Optimistic unsave
+      setSavedEventIds(prev => { const next = new Set(prev); next.delete(itemId); return next; });
+      setEventSaveCounts(prev => ({ ...prev, [itemId]: Math.max(0, (prev[itemId] ?? 1) - 1) }));
+      unsaveEvent(user.id, itemId);
+      unsaveDestination(user.id, itemId); // also remove local notification
+    } else {
+      // Optimistic save
+      setSavedEventIds(prev => new Set(prev).add(itemId));
+      setEventSaveCounts(prev => ({ ...prev, [itemId]: (prev[itemId] ?? 0) + 1 }));
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      saveEvent(user.id, itemId, event.event_name ?? '');
+      // Also save locally for notifications
+      const isAviation = ['Fly-In','Airshow','Pancake Breakfast','Poker Run','EAA Event','AOPA Event','Other'].includes(event.category);
+      saveDestination(user.id, {
+        id: itemId,
+        _type: isAviation ? 'event' : 'festival',
+        event_name: event.event_name,
+        city: event.city ?? '',
+        state: event.state ?? '',
+        start_date: event.start_date,
+        end_date: event.end_date ?? event.start_date,
+        nearest_airport: event.nearest_airport ?? '',
+        category: event.category,
+        event_link: event.event_link,
+      });
+    }
   }
 
   async function fetchAirportInfo() {
@@ -2120,6 +2168,9 @@ export default function AirportScreen() {
                     : event.category === 'Festival'
                     ? 'music'
                     : 'airplane';
+                  const evId = String(event.id);
+                  const isSaved = savedEventIds.has(evId);
+                  const saves = eventSaveCounts[evId] ?? 0;
                   return (
                     <TouchableOpacity
                       key={event.id}
@@ -2127,7 +2178,7 @@ export default function AirportScreen() {
                       onPress={() => setFlyTripEvent(event)}
                       activeOpacity={0.78}
                     >
-                      {/* Category icon thumbnail — same footprint as PlaceCard thumb */}
+                      {/* Category icon thumbnail */}
                       <View style={[styles.doEventThumb, { backgroundColor: accent + '22', borderColor: accent + '30' }]}>
                         <MaterialCommunityIcons name={catIcon as any} size={22} color={accent} />
                       </View>
@@ -2141,9 +2192,27 @@ export default function AirportScreen() {
                           )}
                         </View>
                         <Text style={styles.doEventName} numberOfLines={2}>{event.event_name}</Text>
-                        <Text style={styles.doEventDate}>{dateStr}{endStr}</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 }}>
+                          <Text style={styles.doEventDate}>{dateStr}{endStr}</Text>
+                          {saves > 0 && (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                              <MaterialCommunityIcons name="account-group-outline" size={11} color="#4A5B73" />
+                              <Text style={{ fontSize: 10, color: '#4A5B73', fontWeight: '600' }}>{saves} saved</Text>
+                            </View>
+                          )}
+                        </View>
                       </View>
-                      <Feather name="chevron-right" size={14} color="rgba(255,255,255,0.25)" style={{ marginLeft: 8 }} />
+                      <TouchableOpacity
+                        onPress={(e) => { e.stopPropagation?.(); toggleEventSave(event); }}
+                        hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                        style={{ paddingLeft: 8 }}
+                      >
+                        <MaterialCommunityIcons
+                          name={isSaved ? 'bookmark' : 'bookmark-outline'}
+                          size={22}
+                          color={isSaved ? '#FBBF24' : '#3A4A5F'}
+                        />
+                      </TouchableOpacity>
                     </TouchableOpacity>
                   );
                 })}
@@ -2166,8 +2235,9 @@ export default function AirportScreen() {
           onClose={() => setFlyTripEvent(null)}
           location={airportLat && airportLng ? { latitude: airportLat, longitude: airportLng } : null}
           userId={user?.id ?? null}
-          saved={false}
-          onSave={() => {}}
+          saved={savedEventIds.has(String(flyTripEvent.id))}
+          onSave={() => toggleEventSave(flyTripEvent)}
+          saveCount={eventSaveCounts[String(flyTripEvent.id)] ?? 0}
         />
       )}
 
