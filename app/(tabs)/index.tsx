@@ -70,7 +70,7 @@ const PBASE  = 'https://maps.googleapis.com/maps/api/place';
 
 // Bump this when FOOD_CHAINS_LOWER changes so cached snapshots with un-filtered
 // chain restaurants are automatically discarded and rebuilt.
-const CHAIN_FILTER_VERSION = 4; // bumped to invalidate snapshots with satellite-only photos
+const CHAIN_FILTER_VERSION = 5; // bumped: limit live fetches per rebuild, cache-first approach
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -170,12 +170,17 @@ const SATELLITE_FALLBACK = (lat: number, lng: number) =>
  * result cached for 7 days so it never fires again for this airport).
  * Falls back to satellite tile if rate-limited or no results.
  */
+// Track how many live fetches we've done this build cycle so we don't
+// blow through the budget on a single Discover rebuild.
+let _discoverLiveFetches = 0;
+const DISCOVER_LIVE_FETCH_LIMIT = 8; // max live API calls per rebuild
+
 async function getCardPhoto(
   icao: string, lat: number, lng: number,
   cacheCategory: 'restaurants' | 'hotels' | 'golf' | 'things',
   placeType: string, source: string,
 ): Promise<{ photoUri: string | null; placeName: string | null }> {
-  // 1. Check cache
+  // 1. Check cache — FREE, no API cost
   try {
     const cached = await getCachedCategory(icao, cacheCategory);
     if (cached && cached.length > 0) {
@@ -193,12 +198,13 @@ async function getCardPhoto(
     }
   } catch {}
 
-  // 2. One live fetch — rate-limited, result cached for 7 days
-  if (GOOGLE_KEY) {
+  // 2. One live fetch — limited per rebuild + rate-limited globally
+  if (GOOGLE_KEY && _discoverLiveFetches < DISCOVER_LIVE_FETCH_LIMIT) {
     try {
       const allowed = canCallPlaces('nearbysearch', source, 'low');
-      if (__DEV__) console.log(`[CardPhoto] ${icao}/${cacheCategory} — cache MISS, live fetch ${allowed ? 'ALLOWED' : 'BLOCKED'}`);
+      if (__DEV__) console.log(`[CardPhoto] ${icao}/${cacheCategory} — cache MISS, live fetch ${allowed ? 'ALLOWED' : 'BLOCKED'} (${_discoverLiveFetches}/${DISCOVER_LIVE_FETCH_LIMIT})`);
       if (allowed) {
+        _discoverLiveFetches++;
         const res = await fetch(
           `${PBASE}/nearbysearch/json?location=${lat},${lng}&radius=5000&type=${placeType}&key=${GOOGLE_KEY}`
         );
@@ -1041,12 +1047,10 @@ export default function DiscoverScreen() {
         );
       }
 
+      // Reset live fetch budget for this rebuild
+      _discoverLiveFetches = 0;
+
       // Shared dedup set — airports picked for one section are excluded from others.
-      // Section call order determines priority: hotel first (75-250 nm, most specific
-      // range), then golf, food, park, short — so premium destinations aren't wasted
-      // on multiple sections.
-      // sectionPick() runs synchronously at the start of each builder before any await,
-      // so the usedSet dedup is maintained correctly even though all builds run in parallel.
       const usedSet = new Set<string>();
 
       // Short cards are synchronous — no cache lookup needed
