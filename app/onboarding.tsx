@@ -1,411 +1,838 @@
-import { supabase } from '@/lib/supabase';
+/**
+ * app/onboarding.tsx  ·  4-Screen Pilot Onboarding
+ *
+ * Flow: Welcome → Value Prop → Aircraft Setup → Preferences
+ * No authentication. All data saved to AsyncStorage.
+ */
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { router } from 'expo-router';
+import { useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Dimensions, ScrollView, StyleSheet,
-  Text, TextInput, TouchableOpacity, View
+  ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable,
+  ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { LinearGradient } from 'expo-linear-gradient';
+import Animated, {
+  runOnJS, useAnimatedStyle, useSharedValue, withSpring, withTiming,
+} from 'react-native-reanimated';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import airportsData from '../assets/images/airports.json';
+import { GlassSearchBar } from '../components/GlassSearchBar';
 
-const { width } = Dimensions.get('window');
+// ── Design tokens ─────────────────────────────────────────────────────────────
 
-const INTERESTS = [
-  { id: 'golf', emoji: '⛳', label: 'Golf' },
-  { id: 'food', emoji: '🍽', label: 'Food & Dining' },
-  { id: 'outdoors', emoji: '🌲', label: 'Outdoors & Nature' },
-  { id: 'beach', emoji: '🏖', label: 'Beach & Waterfront' },
-  { id: 'culture', emoji: '🏛', label: 'Museums & Culture' },
-  { id: 'shopping', emoji: '🛍', label: 'Shopping' },
-  { id: 'entertainment', emoji: '🎭', label: 'Entertainment' },
-  { id: 'scenic', emoji: '🏔', label: 'Scenic Flying' },
+const ORANGE = '#FF4D00';
+const SKY    = '#38BDF8';
+
+// ── Airport search ────────────────────────────────────────────────────────────
+
+interface AirportEntry {
+  id: string; icao: string | null; faa: string;
+  name: string; city: string; state: string;
+}
+
+
+function searchAirports(query: string): AirportEntry[] {
+  const q = query.trim().toLowerCase();
+  if (q.length < 2) return [];
+  return (airportsData as AirportEntry[])
+    .filter(a => {
+      const code = (a.icao || a.faa || '').toLowerCase();
+      return code.startsWith(q) ||
+        (a.name || '').toLowerCase().includes(q) ||
+        (a.city || '').toLowerCase().includes(q);
+    })
+    .slice(0, 10);
+}
+
+// ── Aircraft list ─────────────────────────────────────────────────────────────
+
+const AIRCRAFT_LIST = [
+  'Cessna 150', 'Cessna 152', 'Cessna 172 Skyhawk', 'Cessna 182 Skylane',
+  'Cessna 206 Stationair', 'Cessna 210 Centurion',
+  'Piper PA-28 Cherokee', 'Piper PA-28-181 Archer', 'Piper PA-28R Arrow',
+  'Piper PA-32 Cherokee Six', 'Piper PA-46 Malibu', 'Piper PA-46 Meridian',
+  'Beechcraft V35 Bonanza', 'Beechcraft A36 Bonanza',
+  'Beechcraft Baron 55', 'Beechcraft Baron 58',
+  'Mooney M20J 201', 'Mooney M20R Ovation', 'Mooney M20TN Acclaim',
+  'Cirrus SR20', 'Cirrus SR22', 'Cirrus SR22T',
+  'Diamond DA40 Star', 'Diamond DA42 Twin Star',
+  "Van's RV-7", "Van's RV-10", "Van's RV-14",
+  'Grumman AA-5B Tiger', 'American Champion Citabria',
 ];
 
-const TRIP_STYLES = [
-  { id: 'day_trip', emoji: '☀️', label: 'Day Trips', sub: 'Back home by sunset' },
-  { id: 'overnight', emoji: '🌙', label: 'Overnights', sub: 'Stay a night or two' },
-  { id: 'long_xc', emoji: '🗺', label: 'Long XC', sub: 'Multi-day adventures' },
-  { id: 'all', emoji: '✈️', label: 'All of the above', sub: 'Depends on the mood' },
-];
+function searchAircraft(query: string): string[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  return AIRCRAFT_LIST.filter(a => a.toLowerCase().includes(q)).slice(0, 8);
+}
+
+// ── Pilot rating ─────────────────────────────────────────────────────────────
 
 const CERTIFICATES = [
-  { id: 'student', label: 'Student Pilot' },
-  { id: 'private', label: 'Private Pilot' },
+  { id: 'student',    label: 'Student Pilot' },
+  { id: 'private',    label: 'Private Pilot' },
   { id: 'instrument', label: 'Instrument Rated' },
   { id: 'commercial', label: 'Commercial' },
-  { id: 'atp', label: 'ATP' },
-  { id: 'cfi', label: 'CFI' },
+  { id: 'atp',        label: 'ATP' },
+  { id: 'cfi',        label: 'CFI' },
 ];
 
-const STEPS = ['welcome', 'aircraft', 'homebase', 'interests', 'tripstyle', 'certificate', 'logbook', 'done'];
+// ── Preference chips ──────────────────────────────────────────────────────────
+
+const PREFERENCES = [
+  { id: 'food',       label: 'Food Runs',        icon: 'silverware-fork-knife' },
+  { id: 'golf',       label: 'Golf',              icon: 'golf' },
+  { id: 'scenic',     label: 'Scenic',            icon: 'image-filter-hdr' },
+  { id: 'weekend',    label: 'Weekend Trips',     icon: 'calendar-weekend' },
+  { id: 'adventures', label: 'Random Adventures', icon: 'dice-multiple' },
+] as const;
+
+const TOTAL_STEPS = 4;
+
+// ── Primary button (file-level so hooks are stable per instance) ──────────────
+
+function PrimaryBtn({
+  label, onPress, loading = false,
+}: { label: string; onPress: () => void; loading?: boolean }) {
+  const sc = useSharedValue(1);
+  const st = useAnimatedStyle(() => ({
+    transform: [{ scale: withSpring(sc.value, { damping: 18, stiffness: 280 }) }],
+  }));
+  return (
+    <Animated.View style={st}>
+      <Pressable
+        style={s.primaryBtn}
+        onPressIn={() => { sc.value = 0.97; }}
+        onPressOut={() => { sc.value = 1; }}
+        onPress={onPress}
+        disabled={loading}
+      >
+        <View style={s.primaryBtnShine} pointerEvents="none" />
+        {loading
+          ? <ActivityIndicator color="#fff" />
+          : <Text style={s.primaryBtnTxt}>{label}</Text>
+        }
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 export default function OnboardingScreen() {
-  const router = useRouter();
-  const [step, setStep] = useState(0);
+  const [step, setStep]     = useState(0);
   const [saving, setSaving] = useState(false);
 
-  // Form state
-  const [name, setName] = useState('');
-  const [aircraftType, setAircraftType] = useState('');
-  const [cruiseSpeed, setCruiseSpeed] = useState('');
-  const [homeAirport, setHomeAirport] = useState('');
+  // ── Screen 3: Aircraft Setup ───────────────────────────────────────────────
+  const [certificate, setCertificate]         = useState('');
+  const [cruiseSpeed, setCruiseSpeed]         = useState('120');
+  const [cruiseUnit, setCruiseUnit]           = useState<'kts' | 'mph'>('kts');
+  const [homeAirport, setHomeAirport]         = useState('');
+  const [homeAirportName, setHomeAirportName] = useState('');
+  const [airportConfirmed, setAirportConfirmed] = useState(false);
+  const [airportModalOpen, setAirportModalOpen] = useState(false);
+  const [apQuery, setApQuery]   = useState('');
+  const [apResults, setApResults] = useState<AirportEntry[]>([]);
+  const apInputRef = useRef<TextInput>(null);
+
+  const [aircraft, setAircraft]         = useState('');
+  const [acftModalOpen, setAcftModalOpen] = useState(false);
+  const [acftQuery, setAcftQuery]         = useState('');
+  const [acftResults, setAcftResults]     = useState<string[]>([]);
+  const acftInputRef = useRef<TextInput>(null);
+
+  // ── Screen 4: Preferences ─────────────────────────────────────────────────
   const [interests, setInterests] = useState<string[]>([]);
-  const [tripStyle, setTripStyle] = useState<string[]>([]);
-  const [certificate, setCertificate] = useState('');
 
-  const progress = step / (STEPS.length - 1);
 
-  function importLogbook() {
-    Alert.alert('Coming Soon', 'A new way to view your past adventures coming soon');
+  // ── Screen transitions ────────────────────────────────────────────────────
+  const fade   = useSharedValue(1);
+  const slideY = useSharedValue(0);
+  const animStyle = useAnimatedStyle(() => ({
+    opacity: fade.value,
+    transform: [{ translateY: slideY.value }],
+  }));
+
+  function applyStep(next: number) {
+    setStep(next);
+    slideY.value = 16;
+    fade.value   = withTiming(1, { duration: 260 });
+    slideY.value = withTiming(0, { duration: 260 });
   }
+
+  function goNext() {
+    if (step >= TOTAL_STEPS - 1) return;
+    fade.value = withTiming(0, { duration: 150 }, () => runOnJS(applyStep)(step + 1));
+  }
+
+  function goBack() {
+    if (step === 0) return;
+    fade.value = withTiming(0, { duration: 150 }, () => runOnJS(applyStep)(step - 1));
+  }
+
+  // ── Airport modal ─────────────────────────────────────────────────────────
+
+  function openAirportModal() {
+    setApQuery(''); setApResults([]);
+    setAirportModalOpen(true);
+  }
+
+  function selectAirport(a: AirportEntry) {
+    setHomeAirport((a.icao || a.faa).toUpperCase());
+    setHomeAirportName(a.name);
+    setAirportConfirmed(true);
+    setAirportModalOpen(false);
+  }
+
+  // ── Aircraft modal ────────────────────────────────────────────────────────
+
+  function openAcftModal() {
+    setAcftQuery(''); setAcftResults([]);
+    setAcftModalOpen(true);
+  }
+
+  function selectAcft(label: string) {
+    setAircraft(label);
+    setAcftModalOpen(false);
+  }
+
+  function useCustomAcft() {
+    const t = acftQuery.trim();
+    if (!t) return;
+    setAircraft(t);
+    setAcftModalOpen(false);
+  }
+
+  // ── Preferences ───────────────────────────────────────────────────────────
 
   function toggleInterest(id: string) {
-    setInterests(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
+    setInterests(prev =>
+      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+    );
   }
 
-  function toggleTripStyle(id: string) {
-    setTripStyle(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
-  }
-
-  function next() {
-    if (step < STEPS.length - 1) setStep(s => s + 1);
-  }
-
-  function back() {
-    if (step > 0) setStep(s => s - 1);
-  }
+  // ── Finish & Skip ─────────────────────────────────────────────────────────
 
   async function finish() {
     setSaving(true);
-    const userId = name.toLowerCase().replace(/\s+/g, '_') || 'pilot';
+    const speedKts = cruiseUnit === 'mph'
+      ? Math.round(parseInt(cruiseSpeed || '120', 10) / 1.15078)
+      : parseInt(cruiseSpeed || '120', 10);
+
     const profile = {
-      user_id: userId,
-      name,
-      aircraft_type: aircraftType,
-      cruise_speed: cruiseSpeed ? parseInt(cruiseSpeed) : null,
-      home_airport: homeAirport.toUpperCase(),
+      home_airport:         homeAirport || null,
+      home_airport_name:    homeAirportName || null,
+      cruise_speed:         speedKts,
+      aircraft_type:        aircraft || null,
+      certificate:          certificate || null,
       interests,
-      trip_style: tripStyle,
-      certificate,
-      created_at: new Date().toISOString(),
+      onboarding_completed: true,
+      created_at:           new Date().toISOString(),
     };
 
-    // Save to AsyncStorage first (offline fallback)
-    await AsyncStorage.setItem('userProfile', JSON.stringify(profile));
-    await AsyncStorage.setItem('onboardingComplete', 'true');
-    await AsyncStorage.setItem('userId', userId);
-
-    // Try saving to Supabase
     try {
-      await supabase.from('pilot_profiles').upsert(profile);
-    } catch (e) {}
+      await AsyncStorage.setItem('userProfile:guest', JSON.stringify(profile));
+      await AsyncStorage.setItem('hasCompletedOnboarding', 'true');
+    } catch (e: any) {
+      console.warn('[Onboarding] save failed:', e?.message ?? e);
+    }
 
     setSaving(false);
     router.replace('/(tabs)');
   }
 
-  const currentStep = STEPS[step];
+  async function skipAll() {
+    try { await AsyncStorage.setItem('hasCompletedOnboarding', 'true'); } catch {}
+    router.replace('/(tabs)');
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-      {/* Progress bar */}
-      {currentStep !== 'welcome' && currentStep !== 'done' && (
-        <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
+    <SafeAreaView style={s.root} edges={['top', 'bottom']}>
+
+      {/* Background gradient */}
+      <LinearGradient
+        colors={['#060911', '#07101C', '#08132B']}
+        locations={[0, 0.48, 1]}
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none"
+      />
+
+      {/* ── Fixed header: back ← · dots · skip ────────────────────────────── */}
+      <View style={s.header}>
+        {step > 0 ? (
+          <TouchableOpacity onPress={goBack} style={s.headerSide} activeOpacity={0.7}>
+            <Feather name="chevron-left" size={22} color="#4A5B73" />
+          </TouchableOpacity>
+        ) : (
+          <View style={s.headerSide} />
+        )}
+
+        <View style={s.dots}>
+          {Array.from({ length: TOTAL_STEPS }).map((_, i) => (
+            <View
+              key={i}
+              style={[
+                s.dot,
+                i === step && s.dotActive,
+                i < step  && s.dotDone,
+              ]}
+            />
+          ))}
         </View>
-      )}
 
-      <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
-
-        {/* WELCOME */}
-        {currentStep === 'welcome' && (
-          <View style={styles.stepContainer}>
-            <Text style={styles.bigEmoji}>✈️</Text>
-            <Text style={styles.welcomeTitle}>Welcome to{'\n'}Left Seat</Text>
-            <Text style={styles.welcomeSub}>
-              Your personal GA pilot companion. Let's set up your profile so we can find the perfect destinations for you.
-            </Text>
-            <Text style={styles.fieldLabel}>WHAT'S YOUR NAME?</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. Mitchell"
-              placeholderTextColor="#4A5B73"
-              value={name}
-              onChangeText={setName}
-              autoCapitalize="words"
-            />
-            <TouchableOpacity style={[styles.nextBtn, !name && styles.nextBtnDisabled]} onPress={next} disabled={!name}>
-              <Text style={styles.nextBtnText}>Let's Go →</Text>
-            </TouchableOpacity>
-          </View>
+        {step < TOTAL_STEPS - 1 ? (
+          <TouchableOpacity onPress={skipAll} style={s.headerSide} activeOpacity={0.7}>
+            <Text style={s.skipTxt}>Skip</Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={s.headerSide} />
         )}
+      </View>
 
-        {/* AIRCRAFT */}
-        {currentStep === 'aircraft' && (
-          <View style={styles.stepContainer}>
-            <Text style={styles.stepEmoji}>🛩</Text>
-            <Text style={styles.stepTitle}>Your Aircraft</Text>
-            <Text style={styles.stepSub}>This helps us calculate accurate flight times and range for your Surprise Me picks.</Text>
-            <Text style={styles.fieldLabel}>AIRCRAFT TYPE</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. Mooney M20C, Cessna 172"
-              placeholderTextColor="#4A5B73"
-              value={aircraftType}
-              onChangeText={setAircraftType}
-            />
-            <Text style={styles.fieldLabel}>CRUISE SPEED (KTS)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. 150"
-              placeholderTextColor="#4A5B73"
-              value={cruiseSpeed}
-              onChangeText={setCruiseSpeed}
-              keyboardType="numeric"
-            />
-            <View style={styles.navRow}>
-              <TouchableOpacity style={styles.backBtn} onPress={back}><Text style={styles.backBtnText}>← Back</Text></TouchableOpacity>
-              <TouchableOpacity style={[styles.nextBtn, styles.nextBtnFlex, !aircraftType && styles.nextBtnDisabled]} onPress={next} disabled={!aircraftType}>
-                <Text style={styles.nextBtnText}>Next →</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
+      {/* ── Animated screen content ───────────────────────────────────────── */}
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <Animated.View style={[{ flex: 1 }, animStyle]}>
+          <ScrollView
+            contentContainerStyle={s.body}
+            showsVerticalScrollIndicator={false}
+            keyboardDismissMode="on-drag"
+            keyboardShouldPersistTaps="handled"
+          >
 
-        {/* HOME BASE */}
-        {currentStep === 'homebase' && (
-          <View style={styles.stepContainer}>
-            <Text style={styles.stepEmoji}>🏠</Text>
-            <Text style={styles.stepTitle}>Home Base</Text>
-            <Text style={styles.stepSub}>Where do you usually fly out of? We'll use this as your starting point.</Text>
-            <Text style={styles.fieldLabel}>HOME AIRPORT (ICAO)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. KSUS"
-              placeholderTextColor="#4A5B73"
-              value={homeAirport}
-              onChangeText={setHomeAirport}
-              autoCapitalize="characters"
-              maxLength={4}
-            />
-            <View style={styles.navRow}>
-              <TouchableOpacity style={styles.backBtn} onPress={back}><Text style={styles.backBtnText}>← Back</Text></TouchableOpacity>
-              <TouchableOpacity style={[styles.nextBtn, styles.nextBtnFlex, !homeAirport && styles.nextBtnDisabled]} onPress={next} disabled={!homeAirport}>
-                <Text style={styles.nextBtnText}>Next →</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
+            {/* ── SCREEN 1: Welcome ──────────────────────────────────────── */}
+            {step === 0 && (
+              <View>
+                <View style={s.iconRing}>
+                  <MaterialCommunityIcons name="airplane" size={36} color={SKY} />
+                </View>
 
-        {/* INTERESTS */}
-        {currentStep === 'interests' && (
-          <View style={styles.stepContainer}>
-            <Text style={styles.stepEmoji}>🎯</Text>
-            <Text style={styles.stepTitle}>What do you love?</Text>
-            <Text style={styles.stepSub}>Pick everything that sounds like a good reason to fly somewhere.</Text>
-            <View style={styles.grid}>
-              {INTERESTS.map(item => (
-                <TouchableOpacity
-                  key={item.id}
-                  style={[styles.gridItem, interests.includes(item.id) && styles.gridItemActive]}
-                  onPress={() => toggleInterest(item.id)}
-                >
-                  <Text style={styles.gridEmoji}>{item.emoji}</Text>
-                  <Text style={[styles.gridLabel, interests.includes(item.id) && styles.gridLabelActive]}>{item.label}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-            <View style={styles.navRow}>
-              <TouchableOpacity style={styles.backBtn} onPress={back}><Text style={styles.backBtnText}>← Back</Text></TouchableOpacity>
-              <TouchableOpacity style={[styles.nextBtn, styles.nextBtnFlex, interests.length === 0 && styles.nextBtnDisabled]} onPress={next} disabled={interests.length === 0}>
-                <Text style={styles.nextBtnText}>Next →</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
+                <Text style={s.welcomeTitle}>Built by a pilot.{'\n'}For pilots.</Text>
+                <Text style={s.welcomeSub}>
+                  Discover where to fly next — based on distance, time, and what's actually worth it.
+                </Text>
 
-        {/* TRIP STYLE */}
-        {currentStep === 'tripstyle' && (
-          <View style={styles.stepContainer}>
-            <Text style={styles.stepEmoji}>🗺</Text>
-            <Text style={styles.stepTitle}>How do you fly?</Text>
-            <Text style={styles.stepSub}>Select everything that fits your flying style.</Text>
-            <View style={styles.styleList}>
-              {TRIP_STYLES.map(item => (
-                <TouchableOpacity
-                  key={item.id}
-                  style={[styles.styleItem, tripStyle.includes(item.id) && styles.styleItemActive]}
-                  onPress={() => toggleTripStyle(item.id)}
-                >
-                  <Text style={styles.styleEmoji}>{item.emoji}</Text>
-                  <View style={styles.styleText}>
-                    <Text style={[styles.styleLabel, tripStyle.includes(item.id) && styles.styleLabelActive]}>{item.label}</Text>
-                    <Text style={styles.styleSub}>{item.sub}</Text>
+                <PrimaryBtn label="Get Started" onPress={goNext} />
+              </View>
+            )}
+
+            {/* ── SCREEN 2: Value prop ───────────────────────────────────── */}
+            {step === 1 && (
+              <View>
+                <Text style={s.eyebrow}>WHY LEFTSEAT</Text>
+                <Text style={s.title}>Stop guessing{'\n'}where to fly.</Text>
+
+                <View style={s.bulletList}>
+                  {[
+                    {
+                      icon: 'silverware-fork-knife' as const,
+                      text: 'Find airports with food, golf, and things to do',
+                    },
+                    {
+                      icon: 'speedometer' as const,
+                      text: 'See exact distance in NM + estimated flight time',
+                    },
+                    {
+                      icon: 'map-search' as const,
+                      text: 'Discover hidden gems other pilots love',
+                    },
+                  ].map((b, i) => (
+                    <View key={i} style={s.bulletRow}>
+                      <View style={s.bulletIcon}>
+                        <MaterialCommunityIcons name={b.icon} size={18} color={SKY} />
+                      </View>
+                      <Text style={s.bulletTxt}>{b.text}</Text>
+                    </View>
+                  ))}
+                </View>
+
+                <PrimaryBtn label="Continue" onPress={goNext} />
+              </View>
+            )}
+
+            {/* ── SCREEN 3: Aircraft setup ───────────────────────────────── */}
+            {step === 2 && (
+              <View>
+                <Text style={s.eyebrow}>PILOT INFO</Text>
+                <Text style={s.title}>Tell us about{'\n'}your flying.</Text>
+
+                {/* Pilot rating */}
+                <Text style={s.fieldLabel}>PILOT RATING</Text>
+                <View style={s.certRow}>
+                  {CERTIFICATES.map(item => (
+                    <TouchableOpacity
+                      key={item.id}
+                      style={[s.certChip, certificate === item.id && s.certChipActive]}
+                      onPress={() => setCertificate(item.id)}
+                      activeOpacity={0.75}
+                    >
+                      <Text style={[s.certChipTxt, certificate === item.id && s.certChipTxtActive]}>
+                        {item.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {/* Cruise speed + unit toggle */}
+                <Text style={s.fieldLabel}>CRUISE SPEED</Text>
+                <View style={s.speedRow}>
+                  <TextInput
+                    style={[s.input, { flex: 1 }]}
+                    value={cruiseSpeed}
+                    onChangeText={t => setCruiseSpeed(t.replace(/[^0-9]/g, ''))}
+                    keyboardType="numeric"
+                    maxLength={4}
+                    returnKeyType="done"
+                    placeholderTextColor="#5A7A98"
+                    selectionColor={SKY}
+                  />
+                  <View style={s.unitToggle}>
+                    {(['kts', 'mph'] as const).map(u => (
+                      <TouchableOpacity
+                        key={u}
+                        style={[s.unitBtn, cruiseUnit === u && s.unitBtnActive]}
+                        onPress={() => setCruiseUnit(u)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={[s.unitTxt, cruiseUnit === u && s.unitTxtActive]}>
+                          {u}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
                   </View>
-                  {tripStyle.includes(item.id) && <Text style={styles.styleCheck}>✓</Text>}
-                </TouchableOpacity>
-              ))}
-            </View>
-            <View style={styles.navRow}>
-              <TouchableOpacity style={styles.backBtn} onPress={back}><Text style={styles.backBtnText}>← Back</Text></TouchableOpacity>
-              <TouchableOpacity style={[styles.nextBtn, styles.nextBtnFlex, tripStyle.length === 0 && styles.nextBtnDisabled]} onPress={next} disabled={tripStyle.length === 0}>
-                <Text style={styles.nextBtnText}>Next →</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
+                </View>
 
-        {/* CERTIFICATE */}
-        {currentStep === 'certificate' && (
-          <View style={styles.stepContainer}>
-            <Text style={styles.stepEmoji}>📋</Text>
-            <Text style={styles.stepTitle}>Your Certificate</Text>
-            <Text style={styles.stepSub}>Helps us connect you with pilots at a similar stage.</Text>
-            <View style={styles.certList}>
-              {CERTIFICATES.map(item => (
+                {/* Home airport */}
+                <Text style={s.fieldLabel}>HOME AIRPORT</Text>
+                {airportConfirmed ? (
+                  <TouchableOpacity
+                    style={s.selectedCard}
+                    onPress={() => { setAirportConfirmed(false); openAirportModal(); }}
+                    activeOpacity={0.8}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.selectedPrimary}>{homeAirport}</Text>
+                      {homeAirportName ? (
+                        <Text style={s.selectedSecondary} numberOfLines={1}>{homeAirportName}</Text>
+                      ) : null}
+                    </View>
+                    <Text style={s.changeBtn}>Change</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity style={s.trigger} onPress={openAirportModal} activeOpacity={0.7}>
+                    <Text style={s.triggerTxt}>Search by ICAO, name, or city…</Text>
+                    <Feather name="search" size={15} color="#5A7A98" />
+                  </TouchableOpacity>
+                )}
+
+                {/* Aircraft type — optional */}
+                <Text style={s.fieldLabel}>
+                  AIRCRAFT TYPE{'  '}
+                  <Text style={s.optionalLabel}>OPTIONAL</Text>
+                </Text>
+                {aircraft ? (
+                  <TouchableOpacity
+                    style={s.selectedCard}
+                    onPress={openAcftModal}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[s.selectedPrimary, { flex: 1 }]}>{aircraft}</Text>
+                    <Text style={s.changeBtn}>Change</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity style={s.trigger} onPress={openAcftModal} activeOpacity={0.7}>
+                    <Text style={s.triggerTxt}>e.g. Cessna 172, Cirrus SR22…</Text>
+                    <Feather name="chevron-right" size={15} color="#5A7A98" />
+                  </TouchableOpacity>
+                )}
+
+                <PrimaryBtn label="Continue" onPress={goNext} />
+              </View>
+            )}
+
+            {/* ── SCREEN 4: Preferences ─────────────────────────────────── */}
+            {step === 3 && (
+              <View>
+                <Text style={s.eyebrow}>YOUR STYLE</Text>
+                <Text style={s.title}>What kind of flying{'\n'}do you enjoy?</Text>
+                <Text style={s.subtitle}>Select all that apply.</Text>
+
+                <View style={s.prefGrid}>
+                  {PREFERENCES.map(p => {
+                    const active = interests.includes(p.id);
+                    return (
+                      <TouchableOpacity
+                        key={p.id}
+                        style={[s.prefChip, active && s.prefChipActive]}
+                        onPress={() => toggleInterest(p.id)}
+                        activeOpacity={0.75}
+                      >
+                        <MaterialCommunityIcons
+                          name={p.icon}
+                          size={22}
+                          color={active ? SKY : '#6B83A0'}
+                          style={{ marginBottom: 7 }}
+                        />
+                        <Text style={[s.prefTxt, active && s.prefTxtActive]}>
+                          {p.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                <PrimaryBtn label="Start Exploring" onPress={finish} loading={saving} />
+              </View>
+            )}
+
+
+          </ScrollView>
+        </Animated.View>
+      </KeyboardAvoidingView>
+
+      {/* ── Airport search modal ──────────────────────────────────────────────── */}
+      <Modal
+        visible={airportModalOpen}
+        animationType="slide"
+        onRequestClose={() => setAirportModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          style={s.modalRoot}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <View style={s.modalHeader}>
+            <TouchableOpacity
+              onPress={() => setAirportModalOpen(false)}
+              style={s.modalCancelWrap}
+              activeOpacity={0.7}
+            >
+              <Text style={s.modalCancel}>Cancel</Text>
+            </TouchableOpacity>
+            <Text style={s.modalTitle}>Home Airport</Text>
+            <View style={s.modalCancelWrap} />
+          </View>
+
+          <GlassSearchBar
+            inputRef={apInputRef}
+            value={apQuery}
+            onChangeText={t => { setApQuery(t); setApResults(searchAirports(t)); }}
+            placeholder="Search by ICAO, name, or city…"
+            autoFocus
+            style={s.glassBar}
+          />
+
+          <ScrollView
+            style={s.modalList}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
+          >
+            {apResults.map((a, i) => {
+              const code = (a.icao || a.faa).toUpperCase();
+              return (
                 <TouchableOpacity
-                  key={item.id}
-                  style={[styles.certItem, certificate === item.id && styles.certItemActive]}
-                  onPress={() => setCertificate(item.id)}
+                  key={i}
+                  style={[s.modalRow, i < apResults.length - 1 && s.modalRowBorder]}
+                  onPress={() => selectAirport(a)}
+                  activeOpacity={0.7}
                 >
-                  <Text style={[styles.certLabel, certificate === item.id && styles.certLabelActive]}>{item.label}</Text>
-                  {certificate === item.id && <Text style={styles.styleCheck}>✓</Text>}
+                  <Text style={s.modalCode}>{code}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.modalName} numberOfLines={1}>{a.name}</Text>
+                    {a.city ? (
+                      <Text style={s.modalSub}>
+                        {a.city}{a.state ? `, ${a.state}` : ''}
+                      </Text>
+                    ) : null}
+                  </View>
                 </TouchableOpacity>
-              ))}
-            </View>
-            <View style={styles.navRow}>
-              <TouchableOpacity style={styles.backBtn} onPress={back}><Text style={styles.backBtnText}>← Back</Text></TouchableOpacity>
-              <TouchableOpacity style={[styles.nextBtn, styles.nextBtnFlex, !certificate && styles.nextBtnDisabled]} onPress={next} disabled={!certificate}>
-                <Text style={styles.nextBtnText}>Next →</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
+              );
+            })}
+            {apQuery.length >= 2 && apResults.length === 0 && (
+              <Text style={s.modalHint}>No airports found for "{apQuery}"</Text>
+            )}
+            {apQuery.length < 2 && (
+              <Text style={s.modalHint}>Type at least 2 characters to search</Text>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
 
-        {/* LOGBOOK IMPORT */}
-        {currentStep === 'logbook' && (
-          <View style={styles.stepContainer}>
-            <Text style={styles.stepEmoji}>📒</Text>
-            <Text style={styles.stepTitle}>Import Logbook</Text>
-            <Text style={styles.stepSub}>
-              Export your ForeFlight logbook as a CSV and import it here to auto-fill your flight stats.{'\n\n'}
-              In ForeFlight: Logbook → ··· → Export → Logbook CSV
-            </Text>
-
-            <TouchableOpacity style={styles.importBtn} onPress={importLogbook}>
-              <Text style={styles.importBtnText}>📒  Import Logbook</Text>
+      {/* ── Aircraft search modal ─────────────────────────────────────────────── */}
+      <Modal
+        visible={acftModalOpen}
+        animationType="slide"
+        onRequestClose={() => setAcftModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          style={s.modalRoot}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <View style={s.modalHeader}>
+            <TouchableOpacity
+              onPress={() => setAcftModalOpen(false)}
+              style={s.modalCancelWrap}
+              activeOpacity={0.7}
+            >
+              <Text style={s.modalCancel}>Cancel</Text>
             </TouchableOpacity>
-            <Text style={styles.skipHint}>You can also do this later from your profile.</Text>
+            <Text style={s.modalTitle}>Aircraft Type</Text>
+            <View style={s.modalCancelWrap} />
+          </View>
 
-            <View style={styles.navRow}>
-              <TouchableOpacity style={styles.backBtn} onPress={back}><Text style={styles.backBtnText}>← Back</Text></TouchableOpacity>
-              <TouchableOpacity style={[styles.nextBtn, styles.nextBtnFlex]} onPress={next}>
-                <Text style={styles.nextBtnText}>Skip →</Text>
+          <GlassSearchBar
+            inputRef={acftInputRef}
+            value={acftQuery}
+            onChangeText={t => { setAcftQuery(t); setAcftResults(searchAircraft(t)); }}
+            placeholder="e.g. Cessna 172, Cirrus SR22…"
+            autoFocus
+            autoCapitalize="words"
+            style={s.glassBar}
+          />
+
+          <ScrollView
+            style={s.modalList}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
+          >
+            {acftResults.map((label, i) => (
+              <TouchableOpacity
+                key={i}
+                style={[s.modalRow, i < acftResults.length - 1 && s.modalRowBorder]}
+                onPress={() => selectAcft(label)}
+                activeOpacity={0.7}
+              >
+                <MaterialCommunityIcons
+                  name="airplane"
+                  size={18}
+                  color="#6B83A0"
+                  style={{ width: 28 }}
+                />
+                <Text style={s.modalName}>{label}</Text>
               </TouchableOpacity>
-            </View>
-          </View>
-        )}
+            ))}
 
-        {/* DONE */}
-        {currentStep === 'done' && (
-          <View style={styles.stepContainer}>
-            <Text style={styles.bigEmoji}>🎉</Text>
-            <Text style={styles.welcomeTitle}>You're all set,{'\n'}{name}!</Text>
-            <Text style={styles.welcomeSub}>
-              Left Seat is ready to find your perfect destinations based on your interests and flying style.
-            </Text>
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryRow}>🛩  {aircraftType} · {cruiseSpeed} kts</Text>
-              <Text style={styles.summaryRow}>🏠  {homeAirport}</Text>
-              <Text style={styles.summaryRow}>🎯  {interests.map(i => INTERESTS.find(x => x.id === i)?.label).join(', ')}</Text>
-              <Text style={styles.summaryRow}>📋  {CERTIFICATES.find(c => c.id === certificate)?.label}</Text>
-            </View>
-            <TouchableOpacity style={styles.nextBtn} onPress={finish} disabled={saving}>
-              {saving ? <ActivityIndicator color="#0D1421" /> : <Text style={styles.nextBtnText}>Start Flying ✈️</Text>}
-            </TouchableOpacity>
-          </View>
-        )}
-      </ScrollView>
+            {acftQuery.trim().length > 0 && (
+              <TouchableOpacity
+                style={[s.modalRow, s.customRow]}
+                onPress={useCustomAcft}
+                activeOpacity={0.7}
+              >
+                <Feather name="edit-2" size={16} color="#6B83A0" style={{ width: 28 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.customLabel}>Use "{acftQuery.trim()}"</Text>
+                  <Text style={s.customSub}>Enter as custom aircraft</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+
+            {!acftQuery && (
+              <Text style={s.modalHint}>Type to search, or enter a custom aircraft name</Text>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
+
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#070B14' },
-  progressBar: { height: 3, backgroundColor: '#1E2D45', margin: 20, borderRadius: 2 },
-  progressFill: { height: 3, backgroundColor: '#38BDF8', borderRadius: 2 },
-  body: { padding: 24, paddingBottom: 60 },
-  stepContainer: { flex: 1 },
-  bigEmoji: { fontSize: 64, textAlign: 'center', marginTop: 40, marginBottom: 24 },
-  welcomeTitle: { fontSize: 36, fontWeight: '900', color: '#F0F4FF', textAlign: 'center', lineHeight: 44, marginBottom: 16 },
-  welcomeSub: { fontSize: 16, color: '#4A5B73', textAlign: 'center', lineHeight: 24, marginBottom: 40 },
-  stepEmoji: { fontSize: 48, marginBottom: 16, marginTop: 20 },
-  stepTitle: { fontSize: 30, fontWeight: '800', color: '#F0F4FF', marginBottom: 8 },
-  stepSub: { fontSize: 15, color: '#4A5B73', lineHeight: 22, marginBottom: 28 },
-  fieldLabel: { fontSize: 11, fontWeight: '700', color: '#4A5B73', letterSpacing: 1.5, marginBottom: 10, textTransform: 'uppercase' },
-  input: {
-    backgroundColor: '#0D1421', borderRadius: 14, paddingHorizontal: 18,
-    paddingVertical: 16, color: '#F0F4FF', fontSize: 16,
-    borderWidth: 1, borderColor: '#1E2D45', marginBottom: 20,
-  },
-  navRow: { flexDirection: 'row', gap: 12, marginTop: 8 },
-  nextBtn: { backgroundColor: '#38BDF8', borderRadius: 14, paddingVertical: 16, alignItems: 'center', marginTop: 8 },
-  nextBtnFlex: { flex: 1 },
-  nextBtnDisabled: { opacity: 0.35 },
-  nextBtnText: { color: '#0D1421', fontSize: 16, fontWeight: '800' },
-  backBtn: { backgroundColor: '#0D1421', borderRadius: 14, paddingVertical: 16, paddingHorizontal: 20, alignItems: 'center', borderWidth: 1, borderColor: '#1E2D45' },
-  backBtnText: { color: '#4A5B73', fontSize: 15, fontWeight: '600' },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 24 },
-  gridItem: {
-    width: (width - 72) / 2, backgroundColor: '#0D1421', borderRadius: 16,
-    padding: 18, alignItems: 'center', borderWidth: 1, borderColor: '#1E2D45',
-  },
-  gridItemActive: { backgroundColor: '#38BDF8', borderColor: '#38BDF8' },
-  gridEmoji: { fontSize: 32, marginBottom: 8 },
-  gridLabel: { fontSize: 14, fontWeight: '600', color: '#4A5B73', textAlign: 'center' },
-  gridLabelActive: { color: '#0D1421', fontWeight: '800' },
-  styleList: { gap: 10, marginBottom: 24 },
-  styleItem: {
-    flexDirection: 'row', alignItems: 'center', gap: 14,
-    backgroundColor: '#0D1421', borderRadius: 16, padding: 16,
-    borderWidth: 1, borderColor: '#1E2D45',
-  },
-  styleItemActive: { backgroundColor: '#111827', borderColor: '#38BDF8' },
-  styleEmoji: { fontSize: 28 },
-  styleText: { flex: 1 },
-  styleLabel: { fontSize: 16, fontWeight: '700', color: '#4A5B73' },
-  styleLabelActive: { color: '#F0F4FF' },
-  styleSub: { fontSize: 12, color: '#4A5B73', marginTop: 2 },
-  styleCheck: { fontSize: 18, color: '#38BDF8', fontWeight: '800' },
-  certList: { gap: 10, marginBottom: 24 },
-  certItem: {
+// ── Styles ────────────────────────────────────────────────────────────────────
+
+const s = StyleSheet.create({
+
+  // ── Layout ────────────────────────────────────────────────────────────────
+  root: { flex: 1, backgroundColor: '#060911' },
+  body: { paddingHorizontal: 24, paddingBottom: 48 },
+
+  // ── Header ────────────────────────────────────────────────────────────────
+  header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: '#0D1421', borderRadius: 14, padding: 16,
-    borderWidth: 1, borderColor: '#1E2D45',
+    paddingHorizontal: 8, paddingVertical: 10,
   },
-  certItemActive: { backgroundColor: '#111827', borderColor: '#38BDF8' },
-  certLabel: { fontSize: 16, fontWeight: '600', color: '#4A5B73' },
-  certLabelActive: { color: '#F0F4FF', fontWeight: '700' },
-  summaryCard: {
-    backgroundColor: '#0D1421', borderRadius: 16, padding: 20,
-    borderWidth: 1, borderColor: '#1E2D45', gap: 10, marginBottom: 32,
+  headerSide: {
+    width: 56, height: 36, alignItems: 'center', justifyContent: 'center',
   },
-  summaryRow: { fontSize: 15, color: '#F0F4FF', fontWeight: '500' },
-  importBtn: {
-    backgroundColor: '#38BDF8', borderRadius: 14, paddingVertical: 18,
-    alignItems: 'center', marginBottom: 24,
+  skipTxt: { fontSize: 14, color: '#6B83A0', fontWeight: '600' },
+
+  // ── Progress dots ─────────────────────────────────────────────────────────
+  dots: { flexDirection: 'row', gap: 6, alignItems: 'center' },
+  dot: {
+    width: 6, height: 6, borderRadius: 3,
+    backgroundColor: '#111D2C',
   },
-  importBtnText: { color: '#0D1421', fontSize: 16, fontWeight: '800' },
-  statsPreview: {
-    backgroundColor: '#0D1421', borderRadius: 16, padding: 20,
-    borderWidth: 1, borderColor: '#1E2D45', marginBottom: 24, gap: 14,
+  dotActive: {
+    width: 24, borderRadius: 3,
+    backgroundColor: SKY,
+    shadowColor: SKY, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.55, shadowRadius: 6,
   },
-  statsPreviewTitle: { fontSize: 12, fontWeight: '700', color: '#4A5B73', letterSpacing: 1.2, textTransform: 'uppercase', marginBottom: 4 },
-  statsPreviewRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  statsPreviewIcon: { fontSize: 20, width: 28 },
-  statsPreviewLabel: { flex: 1, fontSize: 14, color: '#8A9BB5' },
-  statsPreviewValue: { fontSize: 15, fontWeight: '700', color: '#F0F4FF' },
-  reimportBtn: { marginTop: 4, alignItems: 'center' },
-  reimportBtnText: { fontSize: 13, color: '#38BDF8' },
-  skipHint: { fontSize: 13, color: '#4A5B73', textAlign: 'center', marginTop: -12, marginBottom: 24 },
+  dotDone: { backgroundColor: 'rgba(56,189,248,0.28)' },
+
+  // ── Typography ────────────────────────────────────────────────────────────
+  eyebrow: {
+    fontSize: 11, fontWeight: '800', color: SKY,
+    letterSpacing: 2.2, marginBottom: 14, marginTop: 8,
+  },
+  welcomeTitle: {
+    fontSize: 38, fontWeight: '900', color: '#EDF3FB',
+    letterSpacing: -1.0, lineHeight: 46, marginBottom: 18,
+  },
+  welcomeSub: {
+    fontSize: 16, color: '#7A90AA', lineHeight: 26, marginBottom: 44,
+  },
+  title: {
+    fontSize: 30, fontWeight: '900', color: '#EDF3FB',
+    letterSpacing: -0.8, lineHeight: 38, marginBottom: 10,
+  },
+  subtitle: {
+    fontSize: 14, color: '#7A90AA', lineHeight: 22, marginBottom: 28,
+  },
+
+  // ── Welcome icon ring ─────────────────────────────────────────────────────
+  iconRing: {
+    width: 76, height: 76, borderRadius: 38,
+    backgroundColor: 'rgba(56,189,248,0.08)',
+    borderWidth: 1, borderColor: 'rgba(56,189,248,0.20)',
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: 32, marginTop: 20,
+    shadowColor: SKY, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.22, shadowRadius: 20,
+  },
+
+  // ── Value screen bullets ──────────────────────────────────────────────────
+  bulletList: { gap: 18, marginTop: 32, marginBottom: 44 },
+  bulletRow:  { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  bulletIcon: {
+    width: 42, height: 42, borderRadius: 13, flexShrink: 0,
+    backgroundColor: 'rgba(56,189,248,0.08)',
+    borderWidth: 1, borderColor: 'rgba(56,189,248,0.15)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  bulletTxt: { fontSize: 15, color: '#9AABBD', lineHeight: 22, flex: 1 },
+
+  // ── Form fields ───────────────────────────────────────────────────────────
+  fieldLabel: {
+    fontSize: 10, fontWeight: '800', color: '#6B83A0',
+    letterSpacing: 1.6, textTransform: 'uppercase', marginBottom: 10,
+  },
+  optionalLabel: { color: '#4A5B73', fontWeight: '700', letterSpacing: 1.4 },
+
+  input: {
+    backgroundColor: '#0A1220', borderRadius: 14,
+    paddingHorizontal: 18, paddingVertical: 16,
+    color: '#EDF3FB', fontSize: 20, fontWeight: '700',
+    borderWidth: 1, borderColor: '#1E2D42',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.20, shadowRadius: 4, elevation: 2,
+  },
+
+  // Speed row: input + unit toggle
+  speedRow: { flexDirection: 'row', gap: 10, marginBottom: 28 },
+  unitToggle: {
+    flexDirection: 'row',
+    backgroundColor: '#0A1220',
+    borderRadius: 14, borderWidth: 1, borderColor: '#1E2D42',
+    overflow: 'hidden',
+  },
+  unitBtn: {
+    paddingHorizontal: 18, paddingVertical: 14,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  unitBtnActive: { backgroundColor: 'rgba(56,189,248,0.12)' },
+  unitTxt:       { fontSize: 14, fontWeight: '600', color: '#6B83A0' },
+  unitTxtActive: { color: SKY, fontWeight: '800' },
+
+  // Pilot rating chips — horizontal wrap, matching pref chip aesthetic
+  certRow:          { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 24 },
+  certChip: {
+    paddingVertical: 10, paddingHorizontal: 16,
+    backgroundColor: '#0A1220', borderRadius: 12,
+    borderWidth: 1, borderColor: '#1E2D42',
+  },
+  certChipActive: {
+    backgroundColor: 'rgba(56,189,248,0.10)',
+    borderColor: 'rgba(56,189,248,0.40)',
+  },
+  certChipTxt:       { fontSize: 13, fontWeight: '600', color: '#6B83A0' },
+  certChipTxtActive: { color: '#EDF3FB', fontWeight: '700' },
+
+  trigger: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#0A1220', borderRadius: 14,
+    paddingHorizontal: 18, paddingVertical: 18,
+    borderWidth: 1, borderColor: '#1E2D42', marginBottom: 24,
+  },
+  triggerTxt: { flex: 1, fontSize: 15, color: '#5A7A98' },
+
+  selectedCard: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: 'rgba(4,120,87,0.08)', borderRadius: 14,
+    padding: 16, borderWidth: 1, borderColor: 'rgba(52,211,153,0.28)',
+    marginBottom: 24, gap: 12,
+  },
+  selectedPrimary:   { fontSize: 16, fontWeight: '700', color: '#34D399' },
+  selectedSecondary: { fontSize: 12, color: '#6B83A0', marginTop: 2 },
+  changeBtn:         { fontSize: 13, color: SKY, fontWeight: '600' },
+
+  // ── Preference chips ──────────────────────────────────────────────────────
+  prefGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 36 },
+  prefChip: {
+    width: '46%', flexGrow: 1,
+    paddingVertical: 20, paddingHorizontal: 12,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 16, borderWidth: 1, borderColor: '#1E2D42',
+    alignItems: 'center',
+  },
+  prefChipActive: {
+    backgroundColor: 'rgba(56,189,248,0.08)',
+    borderColor: 'rgba(56,189,248,0.30)',
+  },
+  prefTxt:       { fontSize: 13, fontWeight: '600', color: '#6B83A0', textAlign: 'center' },
+  prefTxtActive: { color: '#EDF3FB', fontWeight: '700' },
+
+  // ── Primary button ────────────────────────────────────────────────────────
+  primaryBtn: {
+    backgroundColor: SKY, borderRadius: 14,
+    paddingVertical: 17, alignItems: 'center', overflow: 'hidden',
+    shadowColor: SKY, shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.28, shadowRadius: 18, elevation: 8,
+  },
+  primaryBtnShine: {
+    position: 'absolute', top: 0, left: 0, right: 0,
+    height: 1, backgroundColor: 'rgba(255,255,255,0.20)',
+  },
+  primaryBtnTxt: { fontSize: 16, fontWeight: '800', color: '#030A14', letterSpacing: 0.2 },
+
+  // ── Modals ────────────────────────────────────────────────────────────────
+  modalRoot: { flex: 1, backgroundColor: '#060911' },
+  modalHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingTop: 60, paddingBottom: 12, paddingHorizontal: 16,
+    borderBottomWidth: 1, borderBottomColor: '#1E2D42',
+  },
+  modalCancelWrap: { width: 70 },
+  modalCancel:     { fontSize: 16, color: SKY, fontWeight: '500' },
+  modalTitle:      { fontSize: 17, fontWeight: '700', color: '#EDF3FB' },
+  glassBar:        { marginHorizontal: 16, marginBottom: 8 },
+  modalList:       { flex: 1, paddingHorizontal: 16 },
+  modalRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 16,
+  },
+  modalRowBorder: { borderBottomWidth: 1, borderBottomColor: '#1E2D42' },
+  modalCode:      { fontSize: 15, fontWeight: '700', color: SKY, width: 52 },
+  modalName:      { fontSize: 14, color: '#EDF3FB', fontWeight: '500' },
+  modalSub:       { fontSize: 12, color: '#4A5B73', marginTop: 2 },
+  modalHint:      { paddingVertical: 32, textAlign: 'center', color: '#5A7A98', fontSize: 13 },
+  customRow:      { marginTop: 8, borderTopWidth: 1, borderTopColor: '#1E2D42' },
+  customLabel:    { fontSize: 14, color: SKY, fontWeight: '600' },
+  customSub:      { fontSize: 12, color: '#4A5B73', marginTop: 2 },
 });

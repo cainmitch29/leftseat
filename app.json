@@ -3,7 +3,7 @@
     "name": "Left Seat",
     "displayName": "Left Seat",
     "slug": "LeftSeat",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "leftseat",
@@ -11,10 +11,15 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.LeftSeat",
+      "bundleIdentifier": "com.mitchellcain.leftseat",
+      "usesAppleSignIn": true,
       "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Left Seat uses your location to show nearby airports on the map, calculate flight distances to destinations, and surface courtesy cars and fly-in events near you.",
         "NSCalendarsUsageDescription": "Left Seat uses your calendar to add fly-in events and airshows.",
-        "NSCalendarsFullAccessUsageDescription": "Left Seat uses your calendar to add fly-in events and airshows."
+        "NSCalendarsFullAccessUsageDescription": "Left Seat uses your calendar to add fly-in events and airshows.",
+        "NSPhotoLibraryUsageDescription": "Left Seat uses your photo library so you can set a profile picture.",
+        "ITSAppUsesNonExemptEncryption": false,
+        "LSApplicationQueriesSchemes": ["foreflight"]
       }
     },
     "android": {
@@ -26,7 +31,10 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.LeftSeat"
+      "package": "com.mitchellcain.leftseat",
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "output": "static",
@@ -34,6 +42,13 @@
     },
     "plugins": [
       "expo-router",
+      "expo-apple-authentication",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Left Seat uses your photo library so you can set a profile picture."
+        }
+      ],
       [
         "expo-splash-screen",
         {
@@ -50,6 +65,19 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "893ef431-c5e0-4766-8dd8-fc282c5bb825"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/893ef431-c5e0-4766-8dd8-fc282c5bb825"
+    },
+    "owner": "cainmitch29"
   }
 }

@@ -1,0 +1,6 @@
+[functions.delete-account]
+# Disable the edge runtime's built-in JWT verification.
+# The function validates the user JWT itself via admin.auth.getUser(token),
+# which is more flexible (handles token refresh edge cases) and returns
+# structured error responses instead of the runtime's opaque {"code":401,"message":"Invalid JWT"}.
+verify_jwt = false

@@ -10,7 +10,16 @@ type NearbyPlaces = {
   things: any[];
 };
 
-// Known generic chains that are not destination-worthy for pilots
+export type WhyCategory = 'food' | 'golf' | 'stay' | 'scenic' | 'event' | 'airport';
+
+export interface WhyItem {
+  text: string;
+  category: WhyCategory;
+  /** 1 = strongest (destination-driven), 3 = generic filler */
+  priority: 1 | 2 | 3;
+  icon: string;
+}
+
 const CHAIN_NAMES = [
   "mcdonald's", "burger king", "wendy's", "taco bell", "kfc", "kentucky fried",
   "subway", "pizza hut", "domino's", "chick-fil-a", "popeyes", "arby's",
@@ -22,7 +31,6 @@ const CHAIN_NAMES = [
   "dollar general", "dollar tree", "family dollar", "autozone", "o'reilly auto",
 ];
 
-// Keywords that suggest a place is destination-worthy
 const DESTINATION_KEYWORDS = [
   "brewery", "brewpub", "brew pub", "taproom", "tap room", "craft beer", "alehouse",
   "winery", "vineyard", "distillery", "cidery",
@@ -36,122 +44,117 @@ const DESTINATION_KEYWORDS = [
   "roadhouse", "tavern", "gastropub",
 ];
 
-/** Score a place for how worthwhile it is as a fly-in destination. */
 function placeScore(p: any): number {
   const name = (p.name || '').toLowerCase();
   const type = (p.type || '').toLowerCase();
-
-  // Rating weighted by review count (more reviews = more reliable signal)
   const rating = parseFloat(p.rating) || 0;
   const reviews = parseInt((p.rating || '').match(/\((\d+)\)/)?.[1] || '0') || 0;
   const ratingScore = rating * (1 + Math.log10(Math.max(reviews, 1) + 1) * 0.5);
-
-  // Mild distance penalty — closer is better, but don't overwhelm quality signal
   const dist = p.distanceMiles ?? 10;
   const distPenalty = dist * 0.3;
-
-  // Heavy penalty for known generic chains
   const isChain = CHAIN_NAMES.some(c => name.includes(c));
   const chainPenalty = isChain ? 5 : 0;
-
-  // Bonus for destination-worthy types
   const isDestination = DESTINATION_KEYWORDS.some(k => name.includes(k) || type.includes(k));
   const destinationBonus = isDestination ? 2 : 0;
-
   return ratingScore - distPenalty - chainPenalty + destinationBonus;
 }
 
-/** Returns the best place from a list using destination-aware scoring. */
 function bestPlace(list: any[]): any | null {
   const nearby = (list || []).filter(p => p.distanceMiles != null && p.distanceMiles <= 10);
   if (nearby.length === 0) return null;
   return nearby.sort((a, b) => placeScore(b) - placeScore(a))[0];
 }
 
+/** Format distance consistently: always "X.X mi" with one decimal */
+function fmtDist(mi: number): string {
+  return `${Math.round(mi * 10) / 10} mi`;
+}
+
 /**
- * Generates "Why fly here" bullets from airport data and optional nearby places.
- * Used by both the map preview sheet and the full airport screen
- * so both always show the same content.
- *
- * Structure: exactly one airport-utility bullet, then 2–3 destination bullets.
- * When places data is available, bullets reflect actual nearby results.
- * Falls back to static airport fields when places are not yet loaded.
+ * Generates structured "Why fly here" items from airport data and optional nearby places.
+ * Returns sorted by priority (strongest reasons first).
+ * Hides generic filler when 3+ destination reasons exist.
  */
-export function getWhyFlyHere(airport: any, places?: NearbyPlaces): string[] {
-  const bullets: string[] = [];
-  const hasTower = airport.has_tower === 'ATCT';
+export function getWhyFlyHere(airport: any, places?: NearbyPlaces): WhyItem[] {
+  const items: WhyItem[] = [];
+  // has_tower values: ATCT, ATCT-TRACON, ATCT-RAPCON, ATCT-A/C, NON-ATCT
+  const hasTower = airport.has_tower?.startsWith('ATCT') ?? false;
   const hasFuel  = !!airport.fuel;
   const rl = maxRunwayLength(airport);
 
-  // ── 1. One airport-utility bullet (always first) ─────────────────────────
+  // ── Airport-utility bullet (priority 2 or 3) ──────────────────────────────
   if (hasTower && hasFuel) {
-    bullets.push('Towered field with fuel on the ramp — smooth stop on any cross-country');
+    items.push({ text: 'Towered field with fuel on the ramp', category: 'airport', priority: 2, icon: 'radio-tower' });
   } else if (hasFuel && rl >= 5000) {
-    bullets.push(`${rl.toLocaleString()} ft runway with fuel — handles most GA aircraft with ease`);
+    items.push({ text: `${rl.toLocaleString()} ft runway with fuel available`, category: 'airport', priority: 2, icon: 'gas-station' });
   } else if (hasFuel) {
-    bullets.push('Fuel on the field makes this a convenient cross-country waypoint');
+    items.push({ text: 'Fuel on the field — convenient cross-country waypoint', category: 'airport', priority: 3, icon: 'gas-station' });
   } else if (hasTower) {
-    bullets.push('Controlled field with an easy, predictable pattern');
+    items.push({ text: 'Controlled field with a predictable pattern', category: 'airport', priority: 3, icon: 'radio-tower' });
   } else if (rl >= 5000) {
-    bullets.push(`Long ${rl.toLocaleString()} ft runway and a welcoming, uncrowded pattern`);
+    items.push({ text: `${rl.toLocaleString()} ft runway — handles most GA aircraft`, category: 'airport', priority: 2, icon: 'arrow-collapse-right' });
   } else {
-    bullets.push('Friendly GA airport with a laid-back atmosphere');
+    items.push({ text: 'Friendly GA airport with a relaxed atmosphere', category: 'airport', priority: 3, icon: 'airplane' });
   }
 
-  // ── 2a. Destination bullets from live nearby places data ─────────────────
+  // ── Destination bullets from live nearby places ────────────────────────────
   if (places) {
     const topRest  = bestPlace(places.restaurants);
     const topGolf  = bestPlace(places.golf);
     const topHotel = bestPlace(places.hotels);
     const topThing = bestPlace(places.things);
 
-    if (topRest && bullets.length < 4) {
+    if (topRest) {
       const rating = parseFloat(topRest.rating) || 0;
-      const dist = topRest.distanceMiles as number;
+      const dist = fmtDist(topRest.distanceMiles);
       if (rating >= 4.5) {
-        bullets.push(`${topRest.name} (${dist} mi) is one of the top-rated spots in the area — worth the trip`);
+        items.push({ text: `${topRest.name} — ${dist}, top-rated in the area`, category: 'food', priority: 1, icon: 'silverware-fork-knife' });
       } else if (rating >= 4.0) {
-        bullets.push(`${topRest.name} is ${dist} mi from the ramp — well-reviewed local spot`);
+        items.push({ text: `${topRest.name} — ${dist} from the ramp`, category: 'food', priority: 1, icon: 'silverware-fork-knife' });
       } else {
-        bullets.push(`Food within ${Math.ceil(dist)} miles of the field`);
+        items.push({ text: `Dining ${dist} from the field`, category: 'food', priority: 2, icon: 'silverware-fork-knife' });
       }
     }
 
-    if (topGolf && bullets.length < 4) {
-      const dist = topGolf.distanceMiles as number;
-      bullets.push(`${topGolf.name} is ${dist} mi out — fly in, play a round, fly home`);
+    if (topGolf) {
+      const dist = fmtDist(topGolf.distanceMiles);
+      items.push({ text: `${topGolf.name} — ${dist}`, category: 'golf', priority: 1, icon: 'golf-tee' });
     }
 
-    if (topHotel && bullets.length < 4) {
-      const dist = topHotel.distanceMiles as number;
-      bullets.push(`Lodging within ${Math.ceil(dist)} mile${Math.ceil(dist) === 1 ? '' : 's'} — easy overnight or weekend stop`);
+    if (topHotel) {
+      const dist = fmtDist(topHotel.distanceMiles);
+      items.push({ text: `Lodging ${dist} away — easy overnight stop`, category: 'stay', priority: 1, icon: 'bed-outline' });
     }
 
-    if (topThing && bullets.length < 4) {
-      const dist = topThing.distanceMiles as number;
-      bullets.push(`${topThing.name} is ${dist} mi away — good reason to make the trip`);
+    if (topThing) {
+      const dist = fmtDist(topThing.distanceMiles);
+      items.push({ text: `${topThing.name} — ${dist}`, category: 'event', priority: 1, icon: 'flag-variant' });
     }
   } else {
-    // ── 2b. Destination bullets from static airport fields (fallback) ────────
-    if (airport.restaurant) bullets.push('Worth the flight for the local food scene alone');
-    if (airport.golf        && bullets.length < 4) bullets.push('Golf nearby — fly in, play a round, fly home');
-    if (airport.hotel       && bullets.length < 4) bullets.push('Overnight options make this a great weekend getaway');
-    if (airport.attraction  && bullets.length < 4) bullets.push('Local attractions worth exploring after you tie down');
-    if (airport.courtesy_car && bullets.length < 4) bullets.push('Courtesy car puts the whole town within easy reach');
+    // ── Fallback from static airport fields ──────────────────────────────────
+    if (airport.restaurant) items.push({ text: 'Local food scene worth the flight', category: 'food', priority: 2, icon: 'silverware-fork-knife' });
+    if (airport.golf)       items.push({ text: 'Golf nearby — fly in, play a round', category: 'golf', priority: 2, icon: 'golf-tee' });
+    if (airport.hotel)      items.push({ text: 'Overnight options for a weekend getaway', category: 'stay', priority: 2, icon: 'bed-outline' });
+    if (airport.attraction) items.push({ text: 'Local attractions worth exploring', category: 'event', priority: 2, icon: 'flag-variant' });
+    if (airport.courtesy_car) items.push({ text: 'Courtesy car available', category: 'airport', priority: 2, icon: 'car' });
   }
 
-  // ── 3. Fallback destination bullets if data is sparse ────────────────────
-  const location = [airport.city, airport.state].filter(Boolean).join(', ');
-  if (bullets.length < 2) {
-    bullets.push(
-      location
-        ? `${location} is the destination — small town worth the flight`
-        : 'Low-traffic field in an area worth exploring'
-    );
-  }
-  if (bullets.length < 3) {
-    bullets.push('Low-traffic field with a welcoming atmosphere');
+  // ── Filler (only used if we have fewer than 2 items) ───────────────────────
+  if (items.length < 2) {
+    const location = [airport.city, airport.state].filter(Boolean).join(', ');
+    if (location) {
+      items.push({ text: `${location} — small-town destination`, category: 'scenic', priority: 3, icon: 'map-marker' });
+    } else {
+      items.push({ text: 'Quiet field in an area worth exploring', category: 'scenic', priority: 3, icon: 'map-marker' });
+    }
   }
 
-  return bullets.slice(0, 4);
+  // ── Sort: destination-driven first, generic last ───────────────────────────
+  items.sort((a, b) => a.priority - b.priority);
+
+  // If we have 3+ destination/supporting reasons (priority 1–2), hide generic filler (priority 3)
+  const strongCount = items.filter(i => i.priority <= 2).length;
+  const filtered = strongCount >= 3 ? items.filter(i => i.priority <= 2) : items;
+
+  return filtered.slice(0, 4);
 }

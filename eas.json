@@ -1,0 +1,33 @@
+{
+  "cli": {
+    "version": ">= 18.4.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "channel": "development",
+      "env": {
+        "EXPO_PUBLIC_GOOGLE_API_KEY": "AIzaSyDzeCacZtPx44Ns-7img7w6sEJUsb1wNIw"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "env": {
+        "EXPO_PUBLIC_GOOGLE_API_KEY": "AIzaSyDzeCacZtPx44Ns-7img7w6sEJUsb1wNIw"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "channel": "production",
+      "env": {
+        "EXPO_PUBLIC_GOOGLE_API_KEY": "AIzaSyDzeCacZtPx44Ns-7img7w6sEJUsb1wNIw"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
